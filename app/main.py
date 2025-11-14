@@ -210,6 +210,104 @@ async def submit_crawl_job(
         )
 
 
+@app.post(
+    "/crawl/nested/{job_id}",
+    response_model=CrawlResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {"description": "Nested crawl job accepted"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        404: {"model": ErrorResponse, "description": "Parent job not found"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    },
+    tags=["Crawl"]
+)
+async def crawl_nested_urls(
+    job_id: UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Crawl nested URLs found in a completed job's results.
+    
+    This endpoint extracts exam URLs from the results of a completed job
+    and creates new crawl jobs for each nested URL to get more detailed information.
+    
+    Args:
+        job_id: UUID of the parent crawl job
+        background_tasks: FastAPI background tasks
+        db: Database session
+        api_key: Validated API key
+        
+    Returns:
+        CrawlResponse with new job_id for nested crawling
+    """
+    try:
+        logger.info(f"Nested crawl requested for parent job {job_id}")
+        
+        # Get parent job
+        parent_job = await get_job_by_id(db, str(job_id))
+        
+        if not parent_job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Parent job {job_id} not found"
+            )
+        
+        if parent_job.status != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Parent job must be completed. Current status: {parent_job.status}"
+            )
+        
+        # Get results and extract nested URLs
+        from database import get_results_by_job_id
+        results = await get_results_by_job_id(db, str(job_id))
+        
+        all_nested_urls = set()
+        for result in results:
+            urls = extract_exam_urls_from_text(result.content_snippet, result.page_url)
+            all_nested_urls.update(urls)
+        
+        if not all_nested_urls:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No nested exam URLs found in the results"
+            )
+        
+        logger.info(f"Found {len(all_nested_urls)} nested URLs to crawl")
+        
+        # Create a new job for nested crawling
+        # For now, we'll crawl the first nested URL as a demonstration
+        first_url = list(all_nested_urls)[0]
+        nested_job = await create_job(db, first_url, parent_job.keyword)
+        
+        # Add background task
+        background_tasks.add_task(
+            process_crawl_job,
+            job_id=str(nested_job.id),
+            url=first_url,
+            keyword=parent_job.keyword
+        )
+        
+        logger.info(f"Created nested crawl job {nested_job.id} for URL: {first_url}")
+        
+        return CrawlResponse(
+            job_id=nested_job.id,
+            status="started"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating nested crawl: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create nested crawl job"
+        )
+
+
 @app.get(
     "/crawl/{job_id}",
     response_model=CrawlStatusResponse,
@@ -514,6 +612,48 @@ async def poll_firecrawl_status(firecrawl_job_id: str, job_id: str) -> tuple[lis
         return None, error_msg
 
 
+def extract_exam_urls_from_text(text: str, base_url: str) -> List[str]:
+    """
+    Extract exam-related URLs from text content.
+    
+    Args:
+        text: Content to search for URLs
+        base_url: Base URL of the website for relative URL resolution
+        
+    Returns:
+        List of unique exam-related URLs
+    """
+    urls_found = set()
+    
+    # Pattern for URLs in markdown links [text](url)
+    markdown_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+    for match in re.finditer(markdown_pattern, text):
+        link_text = match.group(1).lower()
+        url = match.group(2)
+        
+        # Check if it's exam-related
+        exam_keywords = ['exam', 'notification', 'recruitment', 'vacancy', 'advertisement', 'result', 'admit']
+        if any(keyword in link_text for keyword in exam_keywords):
+            # Handle relative URLs
+            if url.startswith('http'):
+                urls_found.add(url)
+            elif url.startswith('/'):
+                from urllib.parse import urlparse
+                parsed = urlparse(base_url)
+                full_url = f"{parsed.scheme}://{parsed.netloc}{url}"
+                urls_found.add(full_url)
+    
+    # Pattern for direct URLs
+    url_pattern = r'https?://[^\s\)\]\"\'\<\>]+'
+    for match in re.finditer(url_pattern, text):
+        url = match.group(0)
+        # Check if URL path contains exam-related keywords
+        if any(keyword in url.lower() for keyword in ['exam', 'notification', 'recruitment', 'vacancy', 'result']):
+            urls_found.add(url)
+    
+    return list(urls_found)
+
+
 def extract_dates_from_text(text: str) -> List[Dict[str, str]]:
     """
     Extract dates from text in various formats.
@@ -803,6 +943,9 @@ async def extract_and_store_results(
                 # Extract exam titles with dates
                 exam_info = extract_exam_titles(markdown_content, dates)
                 
+                # Extract nested exam URLs
+                nested_urls = extract_exam_urls_from_text(markdown_content, page_url)
+                
                 # Build structured content snippet
                 if exam_info:
                     # Format as structured data with dates and titles
@@ -816,8 +959,16 @@ async def extract_and_store_results(
                     if len(exam_info) > 10:
                         content_lines.append(f"... and {len(exam_info) - 10} more exam(s)")
                     
+                    # Add nested URLs if found
+                    if nested_urls:
+                        content_lines.append("\n=== NESTED EXAM URLS FOUND ===")
+                        for idx, url in enumerate(nested_urls[:5], 1):
+                            content_lines.append(f"{idx}. {url}")
+                        if len(nested_urls) > 5:
+                            content_lines.append(f"... and {len(nested_urls) - 5} more URL(s)")
+                    
                     content_snippet = "\n".join(content_lines)
-                    logger.info(f"✓ Found {len(exam_info)} exam(s) with dates in: {page_url}")
+                    logger.info(f"✓ Found {len(exam_info)} exam(s) with dates and {len(nested_urls)} nested URLs in: {page_url}")
                     
                 elif dates:
                     # Has dates but no clear exam titles
