@@ -10,6 +10,9 @@ from pydantic import ValidationError
 import logging
 import httpx
 from uuid import UUID
+import re
+from datetime import datetime
+from typing import List, Dict, Optional
 
 from database import init_db, close_db, check_db_connection, get_db, create_job, update_job_status, get_job_by_id, create_result
 from config import settings
@@ -511,6 +514,145 @@ async def poll_firecrawl_status(firecrawl_job_id: str, job_id: str) -> tuple[lis
         return None, error_msg
 
 
+def extract_dates_from_text(text: str) -> List[Dict[str, str]]:
+    """
+    Extract dates from text in various formats.
+    
+    Supports formats like:
+    - DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+    - DD Month YYYY (e.g., 15 January 2025)
+    - Month DD, YYYY (e.g., January 15, 2025)
+    - YYYY-MM-DD (ISO format)
+    
+    Returns:
+        List of dictionaries with 'date' and 'context'
+    """
+    dates_found = []
+    
+    # Pattern 1: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+    pattern1 = r'\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b'
+    for match in re.finditer(pattern1, text):
+        date_str = match.group(0)
+        start = max(0, match.start() - 50)
+        end = min(len(text), match.end() + 50)
+        context = text[start:end].strip()
+        dates_found.append({
+            'date': date_str,
+            'context': context,
+            'position': match.start()
+        })
+    
+    # Pattern 2: DD Month YYYY (e.g., 15 January 2025)
+    months = r'(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
+    pattern2 = rf'\b(\d{{1,2}})\s+({months})\s+(\d{{4}})\b'
+    for match in re.finditer(pattern2, text, re.IGNORECASE):
+        date_str = match.group(0)
+        start = max(0, match.start() - 50)
+        end = min(len(text), match.end() + 50)
+        context = text[start:end].strip()
+        dates_found.append({
+            'date': date_str,
+            'context': context,
+            'position': match.start()
+        })
+    
+    # Pattern 3: Month DD, YYYY (e.g., January 15, 2025)
+    pattern3 = rf'\b({months})\s+(\d{{1,2}}),?\s+(\d{{4}})\b'
+    for match in re.finditer(pattern3, text, re.IGNORECASE):
+        date_str = match.group(0)
+        start = max(0, match.start() - 50)
+        end = min(len(text), match.end() + 50)
+        context = text[start:end].strip()
+        dates_found.append({
+            'date': date_str,
+            'context': context,
+            'position': match.start()
+        })
+    
+    # Pattern 4: YYYY-MM-DD (ISO format)
+    pattern4 = r'\b(\d{4})-(\d{1,2})-(\d{1,2})\b'
+    for match in re.finditer(pattern4, text):
+        date_str = match.group(0)
+        start = max(0, match.start() - 50)
+        end = min(len(text), match.end() + 50)
+        context = text[start:end].strip()
+        dates_found.append({
+            'date': date_str,
+            'context': context,
+            'position': match.start()
+        })
+    
+    # Sort by position and remove duplicates
+    dates_found.sort(key=lambda x: x['position'])
+    unique_dates = []
+    seen_dates = set()
+    for date_info in dates_found:
+        if date_info['date'] not in seen_dates:
+            seen_dates.add(date_info['date'])
+            unique_dates.append(date_info)
+    
+    return unique_dates
+
+
+def extract_exam_titles(text: str, dates: List[Dict[str, str]]) -> List[Dict[str, any]]:
+    """
+    Extract exam titles associated with dates.
+    
+    Looks for exam-related keywords near dates to identify exam titles.
+    
+    Returns:
+        List of dictionaries with 'title', 'date', and 'context'
+    """
+    exam_keywords = [
+        'exam', 'examination', 'test', 'recruitment', 'notification',
+        'advertisement', 'vacancy', 'post', 'selection', 'interview',
+        'written test', 'prelims', 'mains', 'tier', 'phase'
+    ]
+    
+    results = []
+    
+    for date_info in dates:
+        date_str = date_info['date']
+        position = date_info['position']
+        
+        # Look for exam title in surrounding text (200 chars before and after date)
+        start = max(0, position - 200)
+        end = min(len(text), position + 200)
+        surrounding_text = text[start:end]
+        
+        # Check if any exam keyword is present
+        has_exam_keyword = any(keyword.lower() in surrounding_text.lower() for keyword in exam_keywords)
+        
+        if has_exam_keyword:
+            # Extract potential title (look for lines or sentences near the date)
+            lines = surrounding_text.split('\n')
+            title_candidates = []
+            
+            for line in lines:
+                line = line.strip()
+                # Skip very short lines or lines that are just dates
+                if len(line) < 10 or line == date_str:
+                    continue
+                # Check if line contains exam-related keywords
+                if any(keyword.lower() in line.lower() for keyword in exam_keywords):
+                    title_candidates.append(line)
+            
+            # Use the first meaningful title or the context
+            title = title_candidates[0] if title_candidates else surrounding_text[:100].strip()
+            
+            # Clean up the title
+            title = re.sub(r'\s+', ' ', title)  # Remove extra whitespace
+            title = title.replace('|', ' ').replace('*', '').strip()
+            
+            results.append({
+                'title': title,
+                'date': date_str,
+                'context': surrounding_text.strip()
+            })
+    
+    return results
+
+
 def extract_context_around_keyword(content: str, keyword: str, context_chars: int = 200) -> str:
     """
     Extract context around the keyword from content.
@@ -615,13 +757,13 @@ async def extract_and_store_results(
     keyword: str
 ):
     """
-    Extract pages containing keyword and store results with intelligent matching.
+    Extract pages containing keyword with intelligent date and title extraction.
     
-    Uses flexible keyword matching to find relevant pages:
-    - Exact matches (case-insensitive)
-    - Multi-word keyword matching (all words present)
-    - Partial matches for longer keywords
-    - Context extraction around matched keywords
+    Features:
+    - Flexible keyword matching (exact, multi-word, partial)
+    - Automatic date extraction (multiple formats)
+    - Exam title extraction near dates
+    - Structured data output with dates and titles
     
     Args:
         db: Database session
@@ -631,6 +773,7 @@ async def extract_and_store_results(
     """
     matches_found = 0
     pages_processed = 0
+    total_dates_found = 0
     
     logger.info(f"Job {job_id}: Processing {len(crawled_data)} pages for keyword '{keyword}'")
     
@@ -653,8 +796,47 @@ async def extract_and_store_results(
             found, matched_terms = search_keyword_flexible(markdown_content, keyword)
             
             if found:
-                # Extract context around keyword for better results
-                content_snippet = extract_context_around_keyword(markdown_content, keyword, context_chars=300)
+                # Extract dates from content
+                dates = extract_dates_from_text(markdown_content)
+                total_dates_found += len(dates)
+                
+                # Extract exam titles with dates
+                exam_info = extract_exam_titles(markdown_content, dates)
+                
+                # Build structured content snippet
+                if exam_info:
+                    # Format as structured data with dates and titles
+                    content_lines = ["=== EXAM INFORMATION ===\n"]
+                    for idx, info in enumerate(exam_info[:10], 1):  # Limit to 10 entries
+                        content_lines.append(f"{idx}. EXAM: {info['title']}")
+                        content_lines.append(f"   DATE: {info['date']}")
+                        content_lines.append(f"   CONTEXT: {info['context'][:150]}...")
+                        content_lines.append("")
+                    
+                    if len(exam_info) > 10:
+                        content_lines.append(f"... and {len(exam_info) - 10} more exam(s)")
+                    
+                    content_snippet = "\n".join(content_lines)
+                    logger.info(f"✓ Found {len(exam_info)} exam(s) with dates in: {page_url}")
+                    
+                elif dates:
+                    # Has dates but no clear exam titles
+                    content_lines = ["=== DATES FOUND ===\n"]
+                    for idx, date_info in enumerate(dates[:10], 1):
+                        content_lines.append(f"{idx}. DATE: {date_info['date']}")
+                        content_lines.append(f"   CONTEXT: {date_info['context'][:150]}...")
+                        content_lines.append("")
+                    
+                    if len(dates) > 10:
+                        content_lines.append(f"... and {len(dates) - 10} more date(s)")
+                    
+                    content_snippet = "\n".join(content_lines)
+                    logger.info(f"✓ Found {len(dates)} date(s) in: {page_url}")
+                    
+                else:
+                    # Keyword match but no dates - use context extraction
+                    content_snippet = extract_context_around_keyword(markdown_content, keyword, context_chars=300)
+                    logger.info(f"✓ Keyword match (no dates) in: {page_url}")
                 
                 # Store the result
                 await create_result(
@@ -665,7 +847,7 @@ async def extract_and_store_results(
                     content_snippet=content_snippet
                 )
                 matches_found += 1
-                logger.info(f"✓ Match found in: {page_url} (matched: {', '.join(matched_terms[:3])})")
+                
             else:
                 logger.debug(f"No match in: {page_url}")
                 
@@ -673,7 +855,7 @@ async def extract_and_store_results(
             logger.error(f"Error processing page {page_url}: {e}", exc_info=True)
             continue
     
-    logger.info(f"Job {job_id}: Processed {pages_processed} pages, found {matches_found} matches for keyword '{keyword}'")
+    logger.info(f"Job {job_id}: Processed {pages_processed} pages, found {matches_found} matches with {total_dates_found} total dates for keyword '{keyword}'")
 
 
 if __name__ == "__main__":
