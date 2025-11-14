@@ -106,8 +106,8 @@
   - Mark job as "failed" with timeout error message if time exceeded
   - _Requirements: 10.4_
 
-- [ ] 8. Create Docker Compose configuration
-- [ ] 8.1 Write docker-compose.yaml with all service definitions
+- [x] 8. Create Docker Compose configuration
+- [x] 8.1 Write docker-compose.yaml with all service definitions
   - Define fastapi-app service with build context and port mapping (8000:8000)
   - Define firecrawl-api service with environment variables and dependencies
   - Define nuq-postgres service with volume for data persistence
@@ -116,22 +116,22 @@
   - Create backend network for service communication
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6_
 
-- [ ] 8.2 Create Dockerfile for FastAPI application
+- [x] 8.2 Create Dockerfile for FastAPI application
   - Use python:3.13-slim base image
   - Copy requirements.txt and install dependencies
   - Copy application code to /app directory
   - Set CMD to run uvicorn with host 0.0.0.0 and port 8000
   - _Requirements: 5.1_
 
-- [ ] 8.3 Create .env.example file with required environment variables
+- [x] 8.3 Create .env.example file with required environment variables
   - Document APP_API_KEY variable for FastAPI authentication
   - Document database connection variables (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB)
   - Document Firecrawl configuration variables (NUM_WORKERS_PER_QUEUE, USE_DB_AUTHENTICATION)
   - Add comments explaining each variable's purpose
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
 
-- [ ] 9. Add logging and monitoring
-- [ ] 9.1 Implement structured logging
+- [x] 9. Add logging and monitoring
+- [x] 9.1 Implement structured logging
   - Configure Python logging with JSON formatter
   - Log job creation events with job_id and input parameters
   - Log Firecrawl API calls and responses
@@ -139,35 +139,35 @@
   - Log errors with full stack traces and context
   - _Requirements: 10.5_
 
-- [ ] 9.2 Add health check endpoints
+- [x] 9.2 Add health check endpoints
   - Create GET /health endpoint that returns 200 OK
   - Create GET /readiness endpoint that checks database connectivity
   - Return 503 from readiness endpoint if database is unavailable
   - _Requirements: 10.2_
 
-- [ ] 10. Write integration tests
-- [ ] 10.1 Create end-to-end test for successful crawl flow
+- [x] 10. Write integration tests
+- [x] 10.1 Create end-to-end test for successful crawl flow
   - Submit crawl job with test URL and keyword
   - Poll status endpoint until job completes
   - Verify results contain expected pages with keyword matches
   - Verify database records are created correctly
   - _Requirements: 1.1, 1.2, 2.4, 3.3, 4.3_
 
-- [ ] 10.2 Create test for authentication failures
+- [x] 10.2 Create test for authentication failures
   - Test POST /crawl without API key (expect 401)
   - Test POST /crawl with invalid API key (expect 401)
   - Test GET /crawl/{job_id} without API key (expect 401)
   - _Requirements: 8.1, 8.2_
 
-- [ ] 10.3 Create test for error scenarios
+- [x] 10.3 Create test for error scenarios
   - Test with invalid URL format (expect 400)
   - Test with non-existent job_id (expect 404)
   - Test job timeout scenario
   - Test Firecrawl unavailable scenario
   - _Requirements: 1.4, 4.5, 10.1, 10.4_
 
-- [ ] 11. Create documentation
-- [ ] 11.1 Write README.md with setup instructions
+- [x] 11. Create documentation
+- [x] 11.1 Write README.md with setup instructions
   - Document prerequisites (Docker, Docker Compose)
   - Provide step-by-step setup instructions
   - Document environment variable configuration
@@ -175,7 +175,7 @@
   - Add troubleshooting section for common issues
   - _Requirements: 5.6, 6.5_
 
-- [ ] 11.2 Create API documentation
+- [x] 11.2 Create API documentation
   - Document all endpoints with request/response examples
   - Document authentication requirements
   - Document error codes and their meanings

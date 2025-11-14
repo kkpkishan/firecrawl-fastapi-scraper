@@ -1,73 +1,65 @@
-# Web Scraping Backend (FastAPI + Firecrawl)
+# Web Scraping Backend API
 
-A scalable web scraping backend service that enables users to submit URLs and keywords for crawling, then retrieve extracted content via a REST API.
+A scalable, production-ready web scraping service built with FastAPI and Firecrawl. This service enables users to submit URLs and keywords for crawling, then retrieve extracted content via a REST API.
 
-## Features
+## 🚀 Features
 
-- 🚀 **FastAPI Backend** - High-performance async REST API
-- 🕷️ **Firecrawl Integration** - Self-hosted web crawler with JavaScript rendering support
-- 🔍 **Keyword Search** - Case-insensitive keyword matching across crawled pages
-- 💾 **PostgreSQL Storage** - Persistent storage for crawl jobs and results
-- 🔐 **API Key Authentication** - Secure access control
-- 🐳 **Docker Compose** - Complete containerized deployment
-- ⚡ **Concurrent Processing** - Handle thousands of crawl jobs simultaneously
+- **Asynchronous Job Processing**: Submit crawl jobs and retrieve results later
+- **Keyword Extraction**: Case-insensitive keyword search across all crawled pages
+- **Firecrawl Integration**: Leverages open-source Firecrawl for robust web crawling
+- **API Key Authentication**: Secure endpoints with API key validation
+- **Comprehensive Error Handling**: Retry logic, timeouts, and graceful degradation
+- **Docker Compose Setup**: Easy deployment with all services containerized
+- **Health Checks**: Built-in health and readiness endpoints
+- **Interactive API Docs**: Swagger UI at `/docs`
 
-## Architecture
+## 📋 Prerequisites
 
-```
-Client → FastAPI Backend → Firecrawl API → Playwright Service
-                ↓                ↓
-         PostgreSQL ← Redis (Queue)
-```
+- **Docker** (version 20.10 or higher)
+- **Docker Compose** (version 2.0 or higher)
+- **Git** (for cloning the repository)
 
-## Prerequisites
+## 🛠️ Quick Start
 
-- Docker (20.10+)
-- Docker Compose (2.0+)
-- 4GB+ RAM recommended
-- 10GB+ disk space
-
-## Quick Start
-
-### 1. Clone and Setup
+### 1. Clone the Repository
 
 ```bash
-# Clone the repository
 git clone <repository-url>
-cd <repository-name>
+cd firecrawl-fastapi-scraper
+```
 
-# Copy environment file
+### 2. Configure Environment Variables
+
+Copy the example environment file and update the values:
+
+```bash
 cp .env.example .env
-
-# Edit .env and set your APP_API_KEY
-nano .env  # or use your preferred editor
 ```
 
-### 2. Generate API Key
-
-Generate a secure API key for production:
+**Important**: Update the following variables in `.env`:
 
 ```bash
-# Using openssl
-openssl rand -hex 32
+# Generate a strong API key (32+ characters recommended)
+APP_API_KEY=your-secure-random-api-key-here
 
-# Or using Python
-python3 -c "import secrets; print(secrets.token_hex(32))"
+# Optional: Change database password for production
+POSTGRES_PASSWORD=your-secure-password
 ```
 
-Update `APP_API_KEY` in `.env` with the generated key.
-
-### 3. Start Services
+### 3. Start the Services
 
 ```bash
-# Build and start all services
-docker-compose up --build
-
-# Or run in detached mode
-docker-compose up -d --build
+docker-compose up -d
 ```
 
-### 4. Verify Services
+This will start all required services:
+- FastAPI Backend (port 8000)
+- Firecrawl API (port 3002)
+- PostgreSQL Database (port 5432)
+- Redis (port 6379)
+- Playwright Service (for JavaScript rendering)
+
+### 4. Verify Installation
 
 Check that all services are running:
 
@@ -75,20 +67,35 @@ Check that all services are running:
 docker-compose ps
 ```
 
-You should see:
-- `fastapi-app` on port 8000
-- `firecrawl-api` on port 3002
-- `nuq-postgres` on port 5432
-- `redis` on port 6379
-- `playwright-service` (internal)
-
-### 5. Test the API
+Test the health endpoint:
 
 ```bash
-# Health check
 curl http://localhost:8000/health
+```
 
-# Submit a crawl job
+Expected response:
+```json
+{
+  "status": "healthy",
+  "service": "fastapi-app"
+}
+```
+
+## 📖 API Usage
+
+### Authentication
+
+All API endpoints require an API key in the `X-API-Key` header:
+
+```bash
+curl -H "X-API-Key: your-api-key-here" http://localhost:8000/crawl
+```
+
+### Submit a Crawl Job
+
+**Endpoint**: `POST /crawl`
+
+```bash
 curl -X POST http://localhost:8000/crawl \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key-here" \
@@ -96,137 +103,221 @@ curl -X POST http://localhost:8000/crawl \
     "url": "https://example.com",
     "keyword": "example"
   }'
-
-# Check job status (replace {job_id} with the returned ID)
-curl http://localhost:8000/crawl/{job_id} \
-  -H "X-API-Key: your-api-key-here"
 ```
 
-## API Documentation
-
-### Endpoints
-
-#### POST /crawl
-Submit a new crawl job.
-
-**Request:**
+**Response** (202 Accepted):
 ```json
 {
-  "url": "https://example.com",
-  "keyword": "search term"
-}
-```
-
-**Headers:**
-- `X-API-Key`: Your API key
-- `Content-Type`: application/json
-
-**Response (202 Accepted):**
-```json
-{
-  "job_id": "uuid",
+  "job_id": "123e4567-e89b-12d3-a456-426614174000",
   "status": "started"
 }
 ```
 
-#### GET /crawl/{job_id}
-Retrieve crawl job status and results.
+### Check Job Status
 
-**Headers:**
-- `X-API-Key`: Your API key
+**Endpoint**: `GET /crawl/{job_id}`
 
-**Response (200 OK):**
+```bash
+curl -X GET http://localhost:8000/crawl/123e4567-e89b-12d3-a456-426614174000 \
+  -H "X-API-Key": your-api-key-here"
+```
+
+**Response** (In Progress):
 ```json
 {
-  "job_id": "uuid",
+  "job_id": "123e4567-e89b-12d3-a456-426614174000",
   "url": "https://example.com",
-  "keyword": "search term",
+  "keyword": "example",
+  "status": "in_progress",
+  "results": null,
+  "error": null,
+  "created_at": "2025-11-14T12:00:00",
+  "completed_at": null
+}
+```
+
+**Response** (Completed):
+```json
+{
+  "job_id": "123e4567-e89b-12d3-a456-426614174000",
+  "url": "https://example.com",
+  "keyword": "example",
   "status": "completed",
   "results": [
     {
-      "page_url": "https://example.com/page",
+      "page_url": "https://example.com/page1",
       "page_title": "Page Title",
       "content_snippet": "Content containing the keyword..."
     }
   ],
-  "created_at": "2024-01-01T00:00:00",
-  "completed_at": "2024-01-01T00:01:00"
+  "error": null,
+  "created_at": "2025-11-14T12:00:00",
+  "completed_at": "2025-11-14T12:01:00"
 }
 ```
 
-**Status Values:**
-- `pending` - Job created, not yet started
-- `in_progress` - Crawling in progress
-- `completed` - Crawling finished successfully
-- `failed` - Crawling failed (check error field)
+## 📚 API Documentation
 
-## Configuration
+### Interactive Documentation
+
+Visit http://localhost:8000/docs for interactive Swagger UI documentation.
+
+### Available Endpoints
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|---------------|
+| GET | `/` | API information | No |
+| GET | `/health` | Health check | No |
+| GET | `/readiness` | Readiness check | No |
+| POST | `/crawl` | Submit crawl job | Yes |
+| GET | `/crawl/{job_id}` | Get job status | Yes |
+| GET | `/docs` | API documentation | No |
+
+### Status Codes
+
+| Code | Description |
+|------|-------------|
+| 200 | Success |
+| 202 | Accepted (job created) |
+| 400 | Bad Request (invalid input) |
+| 401 | Unauthorized (missing/invalid API key) |
+| 404 | Not Found (job doesn't exist) |
+| 422 | Unprocessable Entity (validation error) |
+| 500 | Internal Server Error |
+| 503 | Service Unavailable (database/service down) |
+
+## 🔧 Configuration
 
 ### Environment Variables
 
-See `.env.example` for all available configuration options.
-
-**Required:**
-- `APP_API_KEY` - API key for authentication
-- `POSTGRES_USER` - Database username
-- `POSTGRES_PASSWORD` - Database password
-- `POSTGRES_DB` - Database name
-
-**Optional:**
-- `NUM_WORKERS_PER_QUEUE` - Firecrawl worker count (default: 8)
-- `LOG_LEVEL` - Logging level (default: INFO)
-- `PROXY_SERVER` - Proxy server URL for Playwright
-- `BLOCK_MEDIA` - Block media requests to save bandwidth
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `APP_API_KEY` | API key for authentication | - | Yes |
+| `LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | INFO | No |
+| `POSTGRES_USER` | PostgreSQL username | postgres | No |
+| `POSTGRES_PASSWORD` | PostgreSQL password | postgres | No |
+| `POSTGRES_DB` | PostgreSQL database name | postgres | No |
+| `NUM_WORKERS_PER_QUEUE` | Firecrawl worker processes | 8 | No |
+| `USE_DB_AUTHENTICATION` | Firecrawl internal auth | false | No |
 
 ### Performance Tuning
 
-**For higher concurrency:**
-```env
-NUM_WORKERS_PER_QUEUE=16  # Increase based on CPU cores
+**Increase Concurrency**:
+```bash
+# In .env file
+NUM_WORKERS_PER_QUEUE=16
 ```
 
-**For production:**
-```env
-LOG_LEVEL=WARNING
-POSTGRES_PASSWORD=strong-password-here
+**Adjust Timeout**:
+```python
+# In app/config.py
+crawl_timeout_seconds: int = 600  # 10 minutes
 ```
 
-## Development
+## 🐛 Troubleshooting
 
-### Project Structure
+### Services Won't Start
 
-```
-.
-├── app/                    # FastAPI application
-│   ├── main.py            # Application entry point
-│   ├── models.py          # Database models
-│   ├── schemas.py         # Pydantic schemas
-│   ├── database.py        # Database connection
-│   └── Dockerfile         # FastAPI container
-├── apps/                   # Firecrawl source code
-│   ├── api/               # Firecrawl API
-│   ├── nuq-postgres/      # PostgreSQL with Firecrawl schema
-│   └── playwright-service-ts/  # Playwright service
-├── docker-compose.yaml    # Service orchestration
-├── .env                   # Environment variables (not in git)
-└── .env.example          # Environment template
+**Problem**: Docker containers fail to start
+
+**Solution**:
+```bash
+# Check logs
+docker-compose logs fastapi-app
+docker-compose logs firecrawl-api
+
+# Restart services
+docker-compose down
+docker-compose up -d
 ```
 
-### Running Locally
+### Database Connection Errors
 
-For development with hot reload:
+**Problem**: "Database service is temporarily unavailable"
+
+**Solution**:
+```bash
+# Check PostgreSQL status
+docker-compose ps nuq-postgres
+
+# Restart database
+docker-compose restart nuq-postgres
+
+# Check logs
+docker-compose logs nuq-postgres
+```
+
+### Firecrawl Not Responding
+
+**Problem**: Jobs stuck in "in_progress" status
+
+**Solution**:
+```bash
+# Check Firecrawl logs
+docker-compose logs firecrawl-api
+
+# Restart Firecrawl
+docker-compose restart firecrawl-api
+
+# Check Redis (required by Firecrawl)
+docker-compose logs redis
+```
+
+### Jobs Timing Out
+
+**Problem**: Jobs fail with timeout error
+
+**Solution**:
+- Increase timeout in `app/config.py`
+- Check if website is accessible
+- Verify Playwright service is running:
+  ```bash
+  docker-compose logs playwright-service
+  ```
+
+### API Key Issues
+
+**Problem**: "Invalid API key" or "Missing API key"
+
+**Solution**:
+- Verify API key in `.env` file
+- Ensure `X-API-Key` header is included in requests
+- Restart FastAPI service after changing `.env`:
+  ```bash
+  docker-compose restart fastapi-app
+  ```
+
+## 🧪 Testing
+
+### Run Automated Tests
 
 ```bash
-# Start only the dependencies
-docker-compose up nuq-postgres redis firecrawl-api playwright-service
+# Comprehensive test suite
+./test_comprehensive.sh
 
-# Run FastAPI locally
-cd app
-pip install -r requirements.txt
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+# Real-world website testing
+./test_real_world.sh
+
+# Authentication tests
+./test_api.sh
 ```
 
-### Viewing Logs
+### Manual Testing
+
+```bash
+# Test health endpoint
+curl http://localhost:8000/health
+
+# Test with example.com
+curl -X POST http://localhost:8000/crawl \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: dev-api-key-change-in-production-12345678" \
+  -d '{"url": "https://example.com", "keyword": "Example"}'
+```
+
+## 📊 Monitoring
+
+### View Logs
 
 ```bash
 # All services
@@ -234,89 +325,154 @@ docker-compose logs -f
 
 # Specific service
 docker-compose logs -f fastapi-app
-docker-compose logs -f firecrawl-api
+
+# Last 100 lines
+docker-compose logs --tail=100 fastapi-app
 ```
 
-## Troubleshooting
-
-### Services won't start
+### Database Queries
 
 ```bash
-# Check service status
-docker-compose ps
+# Connect to database
+docker exec -it nuq-postgres psql -U postgres -d postgres
 
-# View logs
-docker-compose logs
+# View recent jobs
+SELECT id, input_url, keyword, status, created_at 
+FROM crawl_jobs 
+ORDER BY created_at DESC 
+LIMIT 10;
 
-# Restart services
-docker-compose restart
+# View results for a job
+SELECT page_url, page_title 
+FROM crawl_results 
+WHERE job_id = 'your-job-id-here';
 ```
 
-### Database connection errors
+## 🔒 Security Best Practices
+
+1. **Change Default Credentials**:
+   - Generate a strong `APP_API_KEY` (32+ characters)
+   - Change `POSTGRES_PASSWORD` in production
+
+2. **Use HTTPS**:
+   - Deploy behind a reverse proxy (nginx, Caddy)
+   - Enable SSL/TLS certificates
+
+3. **Rate Limiting**:
+   - Implement rate limiting per API key
+   - Use Redis for distributed rate limiting
+
+4. **Network Security**:
+   - Don't expose Firecrawl port (3002) to public internet
+   - Use Docker networks for internal communication
+
+5. **Regular Updates**:
+   - Keep Docker images updated
+   - Monitor security advisories
+
+## 🚀 Production Deployment
+
+### Recommended Setup
+
+1. **Use a Reverse Proxy**:
+   ```nginx
+   server {
+       listen 443 ssl;
+       server_name api.yourdomain.com;
+       
+       location / {
+           proxy_pass http://localhost:8000;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+       }
+   }
+   ```
+
+2. **Enable Monitoring**:
+   - Set up log aggregation (ELK, Grafana Loki)
+   - Configure alerts for errors
+   - Monitor resource usage
+
+3. **Database Backups**:
+   ```bash
+   # Backup database
+   docker exec nuq-postgres pg_dump -U postgres postgres > backup.sql
+   
+   # Restore database
+   docker exec -i nuq-postgres psql -U postgres postgres < backup.sql
+   ```
+
+4. **Scale Services**:
+   ```bash
+   # Increase Firecrawl workers
+   NUM_WORKERS_PER_QUEUE=32
+   
+   # Run multiple FastAPI instances behind load balancer
+   docker-compose up --scale fastapi-app=3
+   ```
+
+## 📝 Development
+
+### Local Development
 
 ```bash
-# Check PostgreSQL is running
-docker-compose ps nuq-postgres
+# Install dependencies
+cd app
+pip install -r requirements.txt
 
-# Check database logs
-docker-compose logs nuq-postgres
-
-# Restart database
-docker-compose restart nuq-postgres
+# Run locally (without Docker)
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Firecrawl not responding
+### Code Structure
 
-```bash
-# Check Firecrawl logs
-docker-compose logs firecrawl-api
-
-# Verify Redis is running
-docker-compose ps redis
-
-# Restart Firecrawl
-docker-compose restart firecrawl-api
+```
+.
+├── app/
+│   ├── main.py          # FastAPI application
+│   ├── models.py        # Database models
+│   ├── schemas.py       # Pydantic schemas
+│   ├── database.py      # Database connection
+│   ├── auth.py          # Authentication
+│   ├── config.py        # Configuration
+│   └── requirements.txt # Python dependencies
+├── docker-compose.yaml  # Service orchestration
+├── .env                 # Environment variables
+└── README.md           # This file
 ```
 
-### Port conflicts
+## 🤝 Contributing
 
-If ports 8000, 3002, 5432, or 6379 are already in use:
+Contributions are welcome! Please follow these guidelines:
 
-```bash
-# Edit docker-compose.yaml and change port mappings
-# Example: "8001:8000" instead of "8000:8000"
-```
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
 
-## Production Deployment
-
-### Security Checklist
-
-- [ ] Change `APP_API_KEY` to a strong random value
-- [ ] Change `POSTGRES_PASSWORD` to a strong password
-- [ ] Remove port mappings for internal services (Redis, PostgreSQL)
-- [ ] Enable HTTPS with reverse proxy (nginx/Traefik)
-- [ ] Set `LOG_LEVEL=WARNING` or `ERROR`
-- [ ] Implement rate limiting
-- [ ] Set up monitoring and alerting
-- [ ] Configure backup for PostgreSQL volume
-
-### Scaling
-
-**Horizontal Scaling:**
-```bash
-# Run multiple FastAPI instances
-docker-compose up --scale fastapi-app=3
-```
-
-**Increase Firecrawl Workers:**
-```env
-NUM_WORKERS_PER_QUEUE=32
-```
-
-## License
+## 📄 License
 
 [Your License Here]
 
-## Support
+## 🆘 Support
 
-For issues and questions, please open an issue on GitHub.
+For issues and questions:
+- Open an issue on GitHub
+- Check existing documentation
+- Review troubleshooting section
+
+## 🎯 Roadmap
+
+- [ ] Add pagination for large result sets
+- [ ] Implement job cancellation
+- [ ] Add webhook notifications
+- [ ] Support for multiple keywords
+- [ ] Fuzzy keyword matching
+- [ ] Export results to CSV/JSON
+- [ ] Admin dashboard
+- [ ] Rate limiting per API key
+
+---
+
+**Built with ❤️ using FastAPI and Firecrawl**
