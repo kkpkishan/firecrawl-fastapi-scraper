@@ -1,0 +1,129 @@
+version: '3.8'
+
+services:
+  # FastAPI Backend Service
+  fastapi-app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: fastapi-app
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_API_KEY=${APP_API_KEY}
+      - DB_URL=postgresql+asyncpg://postgres:postgres@nuq-postgres:5432/postgres
+      - FIRECRAWL_API_URL=http://firecrawl-api:3002
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      - nuq-postgres
+      - firecrawl-api
+    networks:
+      - backend
+    restart: unless-stopped
+    volumes:
+      # Mount code for development (comment out for production)
+      - ./app:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Firecrawl API Service
+  firecrawl-api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: firecrawl-api
+    ports:
+      - "${PORT:-3002}:${INTERNAL_PORT:-3002}"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=${INTERNAL_PORT:-3002}
+      - NUM_WORKERS_PER_QUEUE=${NUM_WORKERS_PER_QUEUE:-8}
+      - REDIS_URL=redis://redis:6379
+      - REDIS_RATE_LIMIT_URL=redis://redis:6379
+      - NUQ_DATABASE_URL=postgres://postgres:postgres@nuq-postgres:5432/postgres
+      - USE_DB_AUTHENTICATION=false
+      - PLAYWRIGHT_MICROSERVICE_URL=http://playwright-service:3000/scrape
+      - LOGGING_LEVEL=${FIRECRAWL_LOGGING_LEVEL:-INFO}
+      - BULL_AUTH_KEY=${BULL_AUTH_KEY:-@}
+      - ENV=local
+    depends_on:
+      - nuq-postgres
+      - redis
+      - playwright-service
+    networks:
+      - backend
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: node dist/src/harness.js --start-docker
+
+  # PostgreSQL Database
+  nuq-postgres:
+    build:
+      context: ./apps/nuq-postgres
+      dockerfile: Dockerfile
+    container_name: nuq-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-postgres}
+    volumes:
+      - nuq-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache and Queue
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - backend
+    restart: unless-stopped
+    command: redis-server --bind 0.0.0.0
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Playwright Service for Dynamic Content
+  playwright-service:
+    build:
+      context: ./apps/playwright-service-ts
+      dockerfile: Dockerfile
+    container_name: playwright-service
+    environment:
+      - PORT=3000
+      - PROXY_SERVER=${PROXY_SERVER:-}
+      - PROXY_USERNAME=${PROXY_USERNAME:-}
+      - PROXY_PASSWORD=${PROXY_PASSWORD:-}
+      - BLOCK_MEDIA=${BLOCK_MEDIA:-false}
+    networks:
+      - backend
+    restart: unless-stopped
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  nuq-data:
+    driver: local
