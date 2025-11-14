@@ -3,15 +3,16 @@ FastAPI Web Scraping Backend - Main Application
 """
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-import os
 import logging
 
 from database import init_db, close_db, check_db_connection
+from config import settings
 
 # Configure logging
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
+    level=settings.log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -26,6 +27,10 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info("Starting up application...")
+    logger.info(f"Environment: {settings.app_name} v{settings.app_version}")
+    logger.info(f"Database URL: {settings.db_url.split('@')[1] if '@' in settings.db_url else 'configured'}")
+    logger.info(f"Firecrawl URL: {settings.firecrawl_api_url}")
+    
     try:
         await init_db()
         logger.info("Database initialized successfully")
@@ -46,20 +51,35 @@ async def lifespan(app: FastAPI):
 
 # Initialize FastAPI app with lifespan
 app = FastAPI(
-    title="Web Scraping Backend API",
+    title=settings.app_name,
     description="A scalable web scraping service using FastAPI and Firecrawl",
-    version="1.0.0",
-    lifespan=lifespan
+    version=settings.app_version,
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=settings.cors_allow_credentials,
+    allow_methods=settings.cors_allow_methods,
+    allow_headers=settings.cors_allow_headers,
 )
 
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
+    """Root endpoint - API information"""
     return {
-        "message": "Web Scraping Backend API",
-        "version": "1.0.0",
-        "status": "running"
+        "message": settings.app_name,
+        "version": settings.app_version,
+        "status": "running",
+        "docs": "/docs",
+        "health": "/health",
+        "readiness": "/readiness"
     }
 
 
