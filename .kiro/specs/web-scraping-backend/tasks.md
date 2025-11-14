@@ -6,56 +6,56 @@
   - Configure service dependencies and networking in Docker Compose
   - _Requirements: 5.2, 5.3, 5.4, 5.5, 6.3, 6.4_
 
-- [ ] 2. Create database schema and models
-- [ ] 2.1 Define SQLAlchemy models for crawl_jobs and crawl_results tables
+- [x] 2. Create database schema and models
+- [x] 2.1 Define SQLAlchemy models for crawl_jobs and crawl_results tables
   - Write CrawlJob model with id, input_url, keyword, status, firecrawl_job_id, created_at, completed_at, error fields
   - Write CrawlResult model with id, job_id, page_url, page_title, content_snippet, created_at fields
   - Configure relationship between CrawlJob and CrawlResult models
   - _Requirements: 9.1, 9.2_
 
-- [ ] 2.2 Create database initialization and migration logic
+- [x] 2.2 Create database initialization and migration logic
   - Write database connection setup using SQLAlchemy async engine
   - Implement table creation logic on application startup
   - Add database indexes for performance (job_id, status, created_at)
   - _Requirements: 9.1, 9.2, 9.3_
 
-- [ ] 3. Implement FastAPI application structure
-- [ ] 3.1 Create FastAPI app with basic configuration
+- [x] 3. Implement FastAPI application structure
+- [x] 3.1 Create FastAPI app with basic configuration
   - Initialize FastAPI application instance
   - Configure CORS settings if needed
   - Set up application startup and shutdown event handlers
   - Configure database connection on startup
   - _Requirements: 5.1, 6.1, 6.2_
 
-- [ ] 3.2 Implement API key authentication dependency
+- [x] 3.2 Implement API key authentication dependency
   - Create verify_api_key dependency function that validates X-API-Key header
   - Read APP_API_KEY from environment variables
   - Return 401 Unauthorized for missing or invalid API keys
   - _Requirements: 1.3, 8.1, 8.2, 8.3, 8.4_
 
-- [ ] 3.3 Define Pydantic request and response models
+- [x] 3.3 Define Pydantic request and response models
   - Create CrawlRequest model with url and keyword fields
   - Create CrawlResponse model with job_id and status fields
   - Create ResultItem model with page_url, page_title, content_snippet fields
   - Create CrawlStatusResponse model with job details and results array
   - _Requirements: 1.1, 4.1, 4.2, 4.3_
 
-- [ ] 4. Implement POST /crawl endpoint
-- [ ] 4.1 Create crawl job submission handler
+- [x] 4. Implement POST /crawl endpoint
+- [x] 4.1 Create crawl job submission handler
   - Validate incoming request using CrawlRequest Pydantic model
   - Validate URL format and reject invalid URLs with 400 status
   - Create new crawl_jobs record with status "pending" and generate UUID
   - Return job_id and status "started" with 202 Accepted status
   - _Requirements: 1.1, 1.2, 1.4, 9.3_
 
-- [ ] 4.2 Integrate Firecrawl API call to start crawl
+- [x] 4.2 Integrate Firecrawl API call to start crawl
   - Use httpx AsyncClient to POST to Firecrawl's /v2/crawl endpoint
   - Send payload with url, limit, and scrapeOptions (formats: ["markdown"])
   - Store returned Firecrawl job ID in crawl_jobs.firecrawl_job_id field
   - Handle Firecrawl connection errors and mark job as failed if unreachable
   - _Requirements: 1.5, 2.1, 10.2_
 
-- [ ] 4.3 Implement background task for crawl result processing
+- [x] 4.3 Implement background task for crawl result processing
   - Add FastAPI BackgroundTask to poll Firecrawl for completion
   - Implement polling loop that checks Firecrawl status endpoint every 5 seconds
   - Retrieve crawled page data when status is "completed"
