@@ -207,6 +207,95 @@ async def submit_crawl_job(
         )
 
 
+@app.get(
+    "/crawl/{job_id}",
+    response_model=CrawlStatusResponse,
+    responses={
+        200: {"description": "Job status retrieved successfully"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        404: {"model": ErrorResponse, "description": "Job not found"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    },
+    tags=["Crawl"]
+)
+async def get_crawl_status(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Get the status and results of a crawl job.
+    
+    Retrieves the current status of a crawl job by its ID. If the job is completed,
+    includes all pages that contain the search keyword.
+    
+    Args:
+        job_id: UUID of the crawl job
+        db: Database session
+        api_key: Validated API key
+        
+    Returns:
+        CrawlStatusResponse with job details and results (if completed)
+        
+    Raises:
+        HTTPException: 404 if job not found, 500 if retrieval fails
+    """
+    try:
+        logger.info(f"Retrieving status for job {job_id}")
+        
+        # Query job by ID
+        job = await get_job_by_id(db, str(job_id))
+        
+        if not job:
+            logger.warning(f"Job not found: {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID {job_id} not found"
+            )
+        
+        # Build response based on job status
+        response_data = {
+            "job_id": job.id,
+            "url": job.input_url,
+            "keyword": job.keyword,
+            "status": job.status,
+            "created_at": job.created_at,
+            "completed_at": job.completed_at,
+            "error": job.error
+        }
+        
+        # If job is completed, include results
+        if job.status == "completed":
+            # Get results from database
+            from database import get_results_by_job_id
+            results = await get_results_by_job_id(db, str(job_id))
+            
+            # Convert results to ResultItem format
+            response_data["results"] = [
+                ResultItem(
+                    page_url=result.page_url,
+                    page_title=result.page_title,
+                    content_snippet=result.content_snippet
+                )
+                for result in results
+            ]
+            logger.info(f"Job {job_id} completed with {len(results)} results")
+        else:
+            response_data["results"] = None
+            logger.info(f"Job {job_id} status: {job.status}")
+        
+        return CrawlStatusResponse(**response_data)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving job status: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve job status"
+        )
+
+
 async def process_crawl_job(job_id: str, url: str, keyword: str):
     """
     Background task to process a crawl job.

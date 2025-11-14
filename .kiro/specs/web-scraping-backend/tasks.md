@@ -63,23 +63,23 @@
   - Update job status to "in_progress" when background processing starts
   - _Requirements: 2.4, 7.1, 7.2_
 
-- [ ] 5. Implement keyword extraction and result storage
-- [ ] 5.1 Create keyword search logic
+- [x] 5. Implement keyword extraction and result storage
+- [x] 5.1 Create keyword search logic
   - Iterate through all crawled pages returned by Firecrawl
   - Perform case-insensitive search for keyword in page markdown content
   - Extract page URL from metadata.sourceURL and page title from metadata.title
   - Extract content snippet containing the keyword (full markdown or context around keyword)
   - _Requirements: 3.1, 3.2_
 
-- [ ] 5.2 Store matching results in database
+- [x] 5.2 Store matching results in database
   - Insert crawl_results record for each page containing the keyword
   - Store job_id, page_url, page_title, and content_snippet
   - Update crawl_jobs status to "completed" and set completed_at timestamp
   - Handle case where no pages contain keyword (mark completed with zero results)
   - _Requirements: 3.3, 3.4, 3.5, 9.4_
 
-- [ ] 6. Implement GET /crawl/{job_id} endpoint
-- [ ] 6.1 Create job status retrieval handler
+- [x] 6. Implement GET /crawl/{job_id} endpoint
+- [x] 6.1 Create job status retrieval handler
   - Query crawl_jobs table by job_id UUID
   - Return 404 Not Found if job_id does not exist
   - Return status "in_progress" if job is not yet completed
