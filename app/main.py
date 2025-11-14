@@ -511,6 +511,103 @@ async def poll_firecrawl_status(firecrawl_job_id: str, job_id: str) -> tuple[lis
         return None, error_msg
 
 
+def extract_context_around_keyword(content: str, keyword: str, context_chars: int = 200) -> str:
+    """
+    Extract context around the keyword from content.
+    
+    Args:
+        content: Full content text
+        keyword: Keyword to find
+        context_chars: Number of characters to include before and after keyword
+        
+    Returns:
+        Content snippet with context around keyword
+    """
+    content_lower = content.lower()
+    keyword_lower = keyword.lower()
+    
+    # Find all occurrences of the keyword
+    positions = []
+    start = 0
+    while True:
+        pos = content_lower.find(keyword_lower, start)
+        if pos == -1:
+            break
+        positions.append(pos)
+        start = pos + 1
+    
+    if not positions:
+        return content[:500] if len(content) > 500 else content
+    
+    # Extract context around first occurrence
+    first_pos = positions[0]
+    start_pos = max(0, first_pos - context_chars)
+    end_pos = min(len(content), first_pos + len(keyword) + context_chars)
+    
+    snippet = content[start_pos:end_pos]
+    
+    # Add ellipsis if truncated
+    if start_pos > 0:
+        snippet = "..." + snippet
+    if end_pos < len(content):
+        snippet = snippet + "..."
+    
+    # Add count if multiple occurrences
+    if len(positions) > 1:
+        snippet += f"\n\n[Found {len(positions)} occurrences of '{keyword}']"
+    
+    return snippet
+
+
+def search_keyword_flexible(content: str, keyword: str) -> tuple[bool, list[str]]:
+    """
+    Flexible keyword search that handles multiple search patterns.
+    
+    Searches for:
+    - Exact keyword match (case-insensitive)
+    - Individual words from multi-word keywords
+    - Partial matches
+    
+    Args:
+        content: Content to search in
+        keyword: Keyword or phrase to search for
+        
+    Returns:
+        Tuple of (found: bool, matched_terms: list)
+    """
+    if not content or not keyword:
+        return False, []
+    
+    content_lower = content.lower()
+    keyword_lower = keyword.lower()
+    matched_terms = []
+    
+    # 1. Check for exact keyword match
+    if keyword_lower in content_lower:
+        matched_terms.append(keyword)
+        return True, matched_terms
+    
+    # 2. For multi-word keywords, check if all words are present
+    words = keyword_lower.split()
+    if len(words) > 1:
+        all_words_found = all(word in content_lower for word in words if len(word) > 2)
+        if all_words_found:
+            matched_terms.extend([word for word in words if word in content_lower])
+            return True, matched_terms
+    
+    # 3. Check for partial matches (at least 70% of keyword length)
+    if len(keyword) > 5:
+        # Split keyword into chunks and check
+        chunk_size = max(4, int(len(keyword) * 0.7))
+        for i in range(len(keyword_lower) - chunk_size + 1):
+            chunk = keyword_lower[i:i + chunk_size]
+            if chunk in content_lower:
+                matched_terms.append(chunk)
+                return True, matched_terms
+    
+    return False, []
+
+
 async def extract_and_store_results(
     db: AsyncSession,
     job_id: str,
@@ -518,43 +615,65 @@ async def extract_and_store_results(
     keyword: str
 ):
     """
-    Extract pages containing keyword and store results.
+    Extract pages containing keyword and store results with intelligent matching.
+    
+    Uses flexible keyword matching to find relevant pages:
+    - Exact matches (case-insensitive)
+    - Multi-word keyword matching (all words present)
+    - Partial matches for longer keywords
+    - Context extraction around matched keywords
     
     Args:
         db: Database session
         job_id: Crawl job ID
         crawled_data: List of crawled pages from Firecrawl
-        keyword: Keyword to search for
+        keyword: Keyword or phrase to search for
     """
-    keyword_lower = keyword.lower()
     matches_found = 0
+    pages_processed = 0
+    
+    logger.info(f"Job {job_id}: Processing {len(crawled_data)} pages for keyword '{keyword}'")
     
     for page in crawled_data:
         try:
+            pages_processed += 1
+            
             # Get page content and metadata
             markdown_content = page.get("markdown", "")
             metadata = page.get("metadata", {})
             page_url = metadata.get("sourceURL", "")
             page_title = metadata.get("title", "")
             
-            # Case-insensitive keyword search
-            if keyword_lower in markdown_content.lower():
+            # Skip empty content
+            if not markdown_content or len(markdown_content.strip()) < 10:
+                logger.debug(f"Skipping page with no content: {page_url}")
+                continue
+            
+            # Flexible keyword search
+            found, matched_terms = search_keyword_flexible(markdown_content, keyword)
+            
+            if found:
+                # Extract context around keyword for better results
+                content_snippet = extract_context_around_keyword(markdown_content, keyword, context_chars=300)
+                
                 # Store the result
                 await create_result(
                     db,
                     job_id=job_id,
                     page_url=page_url,
-                    page_title=page_title,
-                    content_snippet=markdown_content
+                    page_title=page_title or "No Title",
+                    content_snippet=content_snippet
                 )
                 matches_found += 1
-                logger.debug(f"Found keyword in page: {page_url}")
+                logger.info(f"✓ Match found in: {page_url} (matched: {', '.join(matched_terms[:3])})")
+            else:
+                logger.debug(f"No match in: {page_url}")
                 
         except Exception as e:
-            logger.error(f"Error processing page: {e}", exc_info=True)
+            logger.error(f"Error processing page {page_url}: {e}", exc_info=True)
             continue
     
-    logger.info(f"Job {job_id}: Found {matches_found} pages containing keyword '{keyword}'")
+    logger.info(f"Job {job_id}: Processed {pages_processed} pages, found {matches_found} matches for keyword '{keyword}'")
 
 
 if __name__ == "__main__":
