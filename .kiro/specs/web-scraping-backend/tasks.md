@@ -87,20 +87,20 @@
   - Return status "failed" with error message if job failed
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 9.5_
 
-- [ ] 7. Implement error handling and timeout logic
-- [ ] 7.1 Add database connection error handling
+- [x] 7. Implement error handling and timeout logic
+- [x] 7.1 Add database connection error handling
   - Implement connection retry logic with exponential backoff (3 retries)
   - Return 503 Service Unavailable if database is unreachable after retries
   - Log database connection errors for monitoring
   - _Requirements: 10.2_
 
-- [ ] 7.2 Add Firecrawl communication error handling
+- [x] 7.2 Add Firecrawl communication error handling
   - Retry Firecrawl API calls up to 3 times with 2-second delays
   - Mark job as "failed" and store error message if Firecrawl is unreachable
   - Handle Firecrawl error responses and store error details in job record
   - _Requirements: 10.1, 10.5_
 
-- [ ] 7.3 Implement crawl job timeout mechanism
+- [x] 7.3 Implement crawl job timeout mechanism
   - Add timeout check in background polling loop (300 seconds)
   - Calculate elapsed time from job created_at on each poll iteration
   - Mark job as "failed" with timeout error message if time exceeded

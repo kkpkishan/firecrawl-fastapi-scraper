@@ -6,8 +6,10 @@ Handles async database connections using SQLAlchemy with asyncpg driver.
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, DBAPIError
 import os
 import logging
+import asyncio
 from typing import AsyncGenerator
 
 from models import Base
@@ -79,9 +81,45 @@ async def init_db():
         raise
 
 
+async def get_db_with_retry(max_retries: int = 3) -> AsyncSession:
+    """
+    Get database session with retry logic.
+    
+    Attempts to create a database session with exponential backoff retry logic.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        
+    Returns:
+        AsyncSession: Database session
+        
+    Raises:
+        Exception: If all retry attempts fail
+    """
+    for attempt in range(max_retries):
+        try:
+            session = AsyncSessionLocal()
+            # Test the connection
+            await session.execute(text("SELECT 1"))
+            return session
+        except (OperationalError, DBAPIError) as e:
+            logger.warning(f"Database connection attempt {attempt + 1}/{max_retries} failed: {e}")
+            if attempt < max_retries - 1:
+                # Exponential backoff: 1s, 2s, 4s
+                wait_time = 2 ** attempt
+                logger.info(f"Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"Database connection failed after {max_retries} attempts")
+                raise
+        except Exception as e:
+            logger.error(f"Unexpected error connecting to database: {e}")
+            raise
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
-    Dependency function to get database session.
+    Dependency function to get database session with retry logic.
     
     Yields an async database session and ensures it's closed after use.
     Use this with FastAPI's Depends() for automatic session management.
@@ -92,10 +130,20 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             result = await db.execute(select(Item))
             return result.scalars().all()
     """
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
+    session = None
+    try:
+        session = await get_db_with_retry(max_retries=3)
+        yield session
+    except (OperationalError, DBAPIError) as e:
+        logger.error(f"Database unavailable: {e}")
+        # Re-raise as a more specific error that can be caught by FastAPI
+        from fastapi import HTTPException, status
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database service is temporarily unavailable. Please try again later."
+        )
+    finally:
+        if session:
             await session.close()
 
 

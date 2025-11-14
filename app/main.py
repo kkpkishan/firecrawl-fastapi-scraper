@@ -298,11 +298,11 @@ async def get_crawl_status(
 
 async def process_crawl_job(job_id: str, url: str, keyword: str):
     """
-    Background task to process a crawl job.
+    Background task to process a crawl job with comprehensive error handling.
     
     This function:
-    1. Calls Firecrawl API to start the crawl
-    2. Polls Firecrawl for completion
+    1. Calls Firecrawl API to start the crawl (with retries)
+    2. Polls Firecrawl for completion (with timeout)
     3. Extracts pages containing the keyword
     4. Stores results in the database
     
@@ -321,14 +321,15 @@ async def process_crawl_job(job_id: str, url: str, keyword: str):
             # Update job status to "in_progress"
             await update_job_status(db, job_id, "in_progress")
             
-            # Call Firecrawl API to start crawl
-            firecrawl_job_id = await start_firecrawl_job(url)
+            # Call Firecrawl API to start crawl (with retry logic)
+            firecrawl_job_id = await start_firecrawl_job(url, max_retries=3)
             
             if not firecrawl_job_id:
-                logger.error(f"Failed to start Firecrawl job for {job_id}")
+                error_msg = "Failed to start Firecrawl job after 3 retry attempts. Firecrawl service may be unavailable."
+                logger.error(f"Job {job_id}: {error_msg}")
                 await update_job_status(
                     db, job_id, "failed",
-                    error="Failed to start Firecrawl job"
+                    error=error_msg
                 )
                 return
             
@@ -336,14 +337,15 @@ async def process_crawl_job(job_id: str, url: str, keyword: str):
             await update_job_status(db, job_id, "in_progress", firecrawl_job_id=firecrawl_job_id)
             logger.info(f"Firecrawl job started with ID: {firecrawl_job_id}")
             
-            # Poll Firecrawl for completion
-            crawled_data = await poll_firecrawl_status(firecrawl_job_id)
+            # Poll Firecrawl for completion (with timeout and error handling)
+            crawled_data, error_message = await poll_firecrawl_status(firecrawl_job_id, job_id)
             
             if not crawled_data:
-                logger.error(f"Failed to retrieve crawl results for job {job_id}")
+                error_msg = error_message or "Failed to retrieve crawl results from Firecrawl"
+                logger.error(f"Job {job_id}: {error_msg}")
                 await update_job_status(
                     db, job_id, "failed",
-                    error="Failed to retrieve crawl results from Firecrawl"
+                    error=error_msg
                 )
                 return
             
@@ -355,98 +357,158 @@ async def process_crawl_job(job_id: str, url: str, keyword: str):
             logger.info(f"Job {job_id} completed successfully")
             
         except Exception as e:
+            error_msg = f"Internal error: {str(e)}"
             logger.error(f"Error processing job {job_id}: {e}", exc_info=True)
             await update_job_status(
                 db, job_id, "failed",
-                error=f"Internal error: {str(e)}"
+                error=error_msg
             )
 
 
-async def start_firecrawl_job(url: str) -> str | None:
+async def start_firecrawl_job(url: str, max_retries: int = 3) -> str | None:
     """
-    Start a Firecrawl crawl job.
+    Start a Firecrawl crawl job with retry logic.
     
     Args:
         url: URL to crawl
+        max_retries: Maximum number of retry attempts
         
     Returns:
         Firecrawl job ID or None if failed
     """
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{settings.firecrawl_api_url}/v2/crawl",
-                json={
-                    "url": url,
-                    "limit": 10000,
-                    "scrapeOptions": {
-                        "formats": ["markdown"]
+    import asyncio
+    
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{settings.firecrawl_api_url}/v2/crawl",
+                    json={
+                        "url": url,
+                        "limit": 10000,
+                        "scrapeOptions": {
+                            "formats": ["markdown"]
+                        }
                     }
-                }
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("id")
-            else:
-                logger.error(f"Firecrawl API error: {response.status_code} - {response.text}")
-                return None
+                )
                 
-    except Exception as e:
-        logger.error(f"Error calling Firecrawl API: {e}", exc_info=True)
-        return None
+                if response.status_code == 200:
+                    data = response.json()
+                    job_id = data.get("id")
+                    logger.info(f"Firecrawl job created successfully: {job_id}")
+                    return job_id
+                else:
+                    logger.error(f"Firecrawl API error (attempt {attempt + 1}/{max_retries}): {response.status_code} - {response.text}")
+                    if attempt < max_retries - 1:
+                        wait_time = 2  # 2 seconds between retries
+                        logger.info(f"Retrying Firecrawl API call in {wait_time} seconds...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        return None
+                    
+        except httpx.ConnectError as e:
+            logger.error(f"Firecrawl connection error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                wait_time = 2
+                logger.info(f"Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"Firecrawl unreachable after {max_retries} attempts")
+                return None
+        except Exception as e:
+            logger.error(f"Unexpected error calling Firecrawl API: {e}", exc_info=True)
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2)
+            else:
+                return None
+    
+    return None
 
 
-async def poll_firecrawl_status(firecrawl_job_id: str) -> list | None:
+async def poll_firecrawl_status(firecrawl_job_id: str, job_id: str) -> tuple[list | None, str | None]:
     """
-    Poll Firecrawl for job completion.
+    Poll Firecrawl for job completion with timeout and error handling.
     
     Args:
         firecrawl_job_id: Firecrawl job ID
+        job_id: Our internal job ID (for logging)
         
     Returns:
-        List of crawled pages or None if failed/timeout
+        Tuple of (crawled_data, error_message)
+        - crawled_data: List of crawled pages or None if failed
+        - error_message: Error description or None if successful
     """
     import asyncio
     from datetime import datetime, timedelta
     
     start_time = datetime.utcnow()
     timeout = timedelta(seconds=settings.crawl_timeout_seconds)
+    retry_count = 0
+    max_consecutive_errors = 5
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             while True:
                 # Check timeout
-                if datetime.utcnow() - start_time > timeout:
-                    logger.error(f"Crawl job {firecrawl_job_id} timed out")
-                    return None
+                elapsed = datetime.utcnow() - start_time
+                if elapsed > timeout:
+                    error_msg = f"Crawl job timed out after {settings.crawl_timeout_seconds} seconds"
+                    logger.error(f"Job {job_id}: {error_msg}")
+                    return None, error_msg
                 
-                # Poll Firecrawl status
-                response = await client.get(
-                    f"{settings.firecrawl_api_url}/v2/crawl/{firecrawl_job_id}"
-                )
+                try:
+                    # Poll Firecrawl status
+                    response = await client.get(
+                        f"{settings.firecrawl_api_url}/v2/crawl/{firecrawl_job_id}"
+                    )
+                    
+                    if response.status_code == 200:
+                        retry_count = 0  # Reset retry count on successful response
+                        data = response.json()
+                        status = data.get("status")
+                        
+                        if status == "completed":
+                            logger.info(f"Firecrawl job {firecrawl_job_id} completed")
+                            return data.get("data", []), None
+                        elif status == "failed":
+                            error_msg = data.get("error", "Firecrawl job failed")
+                            logger.error(f"Firecrawl job {firecrawl_job_id} failed: {error_msg}")
+                            return None, f"Firecrawl error: {error_msg}"
+                        else:
+                            # Still in progress
+                            logger.debug(f"Job {job_id} still in progress (elapsed: {elapsed.seconds}s)")
+                    else:
+                        retry_count += 1
+                        logger.warning(f"Firecrawl status check failed: {response.status_code} (retry {retry_count}/{max_consecutive_errors})")
+                        
+                        if retry_count >= max_consecutive_errors:
+                            error_msg = f"Firecrawl status check failed {max_consecutive_errors} times consecutively"
+                            logger.error(error_msg)
+                            return None, error_msg
                 
-                if response.status_code != 200:
-                    logger.error(f"Firecrawl status check failed: {response.status_code}")
-                    await asyncio.sleep(settings.polling_interval_seconds)
-                    continue
+                except httpx.ConnectError as e:
+                    retry_count += 1
+                    logger.error(f"Firecrawl connection error (retry {retry_count}/{max_consecutive_errors}): {e}")
+                    
+                    if retry_count >= max_consecutive_errors:
+                        error_msg = "Firecrawl service unreachable"
+                        return None, error_msg
                 
-                data = response.json()
-                status = data.get("status")
+                except Exception as e:
+                    logger.error(f"Error during status polling: {e}", exc_info=True)
+                    retry_count += 1
+                    
+                    if retry_count >= max_consecutive_errors:
+                        error_msg = f"Polling error: {str(e)}"
+                        return None, error_msg
                 
-                if status == "completed":
-                    logger.info(f"Firecrawl job {firecrawl_job_id} completed")
-                    return data.get("data", [])
-                elif status == "failed":
-                    logger.error(f"Firecrawl job {firecrawl_job_id} failed")
-                    return None
-                
-                # Still in progress, wait and poll again
+                # Wait before next poll
                 await asyncio.sleep(settings.polling_interval_seconds)
                 
     except Exception as e:
-        logger.error(f"Error polling Firecrawl status: {e}", exc_info=True)
-        return None
+        error_msg = f"Fatal error polling Firecrawl: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return None, error_msg
 
 
 async def extract_and_store_results(
