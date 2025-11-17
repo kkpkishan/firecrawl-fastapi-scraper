@@ -48,7 +48,8 @@ async def init_db():
     Initialize database by creating all tables.
     
     This function creates the crawl_jobs and crawl_results tables
-    if they don't already exist. It also creates necessary indexes.
+    if they don't already exist. It also creates necessary indexes
+    and runs migrations automatically.
     """
     try:
         logger.info("Initializing database...")
@@ -56,6 +57,40 @@ async def init_db():
         async with engine.begin() as conn:
             # Create all tables defined in Base metadata
             await conn.run_sync(Base.metadata.create_all)
+            
+            # Run migrations - Add data_key and data_value columns if they don't exist
+            logger.info("Running database migrations...")
+            
+            # Check if columns exist
+            result = await conn.execute(text("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'crawl_results' 
+                AND column_name IN ('data_key', 'data_value')
+            """))
+            
+            existing_columns = [row[0] for row in result.fetchall()]
+            
+            # Add data_key column if it doesn't exist
+            if 'data_key' not in existing_columns:
+                logger.info("Adding data_key column to crawl_results table...")
+                await conn.execute(text("""
+                    ALTER TABLE crawl_results 
+                    ADD COLUMN data_key TEXT
+                """))
+                logger.info("✓ Added data_key column")
+            
+            # Add data_value column if it doesn't exist
+            if 'data_value' not in existing_columns:
+                logger.info("Adding data_value column to crawl_results table...")
+                await conn.execute(text("""
+                    ALTER TABLE crawl_results 
+                    ADD COLUMN data_value TEXT
+                """))
+                logger.info("✓ Added data_value column")
+            
+            if existing_columns and len(existing_columns) == 2:
+                logger.info("✓ Migration columns already exist, skipping")
             
             # Create indexes for performance
             # Note: Indexes are defined in the model, but we can add custom ones here
@@ -295,7 +330,9 @@ async def create_result(
     job_id: str,
     page_url: str,
     page_title: str,
-    content_snippet: str
+    content_snippet: str,
+    data_key: str = None,
+    data_value: str = None
 ):
     """
     Create a new crawl result.
@@ -306,6 +343,8 @@ async def create_result(
         page_url: URL of the page
         page_title: Title of the page
         content_snippet: Content containing the keyword
+        data_key: Key/title of extracted data (optional)
+        data_value: Value of extracted data (optional)
         
     Returns:
         Created CrawlResult object
@@ -316,7 +355,9 @@ async def create_result(
         job_id=job_id,
         page_url=page_url,
         page_title=page_title,
-        content_snippet=content_snippet
+        content_snippet=content_snippet,
+        data_key=data_key,
+        data_value=data_value
     )
     
     db.add(result)

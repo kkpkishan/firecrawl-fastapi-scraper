@@ -158,6 +158,19 @@ class CrawlResult(Base):
         comment="Content snippet or full markdown containing the keyword"
     )
     
+    # Structured data storage (key-value pairs)
+    data_key = Column(
+        Text,
+        nullable=True,
+        comment="Key/title of the extracted data"
+    )
+    
+    data_value = Column(
+        Text,
+        nullable=True,
+        comment="Value of the extracted data (short or long format)"
+    )
+    
     # Timestamp
     created_at = Column(
         DateTime,
@@ -183,5 +196,7 @@ class CrawlResult(Base):
             'page_url': self.page_url,
             'page_title': self.page_title,
             'content_snippet': self.content_snippet,
+            'data_key': self.data_key,
+            'data_value': self.data_value,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }

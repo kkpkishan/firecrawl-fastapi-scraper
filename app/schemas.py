@@ -16,6 +16,8 @@ class CrawlRequest(BaseModel):
     Attributes:
         url: The target URL to crawl (must be valid HTTP/HTTPS URL)
         keyword: The search keyword to find in crawled content
+        follow_nested_urls: Whether to automatically crawl nested URLs found in results
+        max_depth: Maximum depth for nested crawling (default: 1)
     """
     url: HttpUrl = Field(
         ...,
@@ -29,12 +31,24 @@ class CrawlRequest(BaseModel):
         description="Keyword or phrase to search for in crawled content",
         examples=["example", "search term"]
     )
+    follow_nested_urls: bool = Field(
+        default=False,
+        description="Automatically crawl nested URLs found in results for deeper data extraction"
+    )
+    max_depth: int = Field(
+        default=1,
+        ge=1,
+        le=3,
+        description="Maximum depth for nested crawling (1-3 levels)"
+    )
     
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "url": "https://example.com",
-                "keyword": "example"
+                "keyword": "example",
+                "follow_nested_urls": False,
+                "max_depth": 1
             }
         }
     )

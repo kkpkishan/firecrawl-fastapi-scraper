@@ -185,7 +185,10 @@ async def submit_crawl_job(
             process_crawl_job,
             job_id=str(job.id),
             url=url_str,
-            keyword=request.keyword
+            keyword=request.keyword,
+            follow_nested=request.follow_nested_urls,
+            max_depth=request.max_depth,
+            current_depth=0
         )
         
         # Return job_id and status "started"
@@ -267,7 +270,7 @@ async def crawl_nested_urls(
         
         all_nested_urls = set()
         for result in results:
-            urls = extract_exam_urls_from_text(result.content_snippet, result.page_url)
+            urls = extract_urls_from_text(result.content_snippet, result.page_url)
             all_nested_urls.update(urls)
         
         if not all_nested_urls:
@@ -397,9 +400,16 @@ async def get_crawl_status(
         )
 
 
-async def process_crawl_job(job_id: str, url: str, keyword: str):
+async def process_crawl_job(
+    job_id: str, 
+    url: str, 
+    keyword: str,
+    follow_nested: bool = False,
+    max_depth: int = 1,
+    current_depth: int = 0
+):
     """
-    Background task to process a crawl job with comprehensive error handling.
+    Background task to process a crawl job with comprehensive error handling and nested crawling.
     
     This function:
     1. Calls Firecrawl API to start the crawl (with retries)
@@ -457,6 +467,10 @@ async def process_crawl_job(job_id: str, url: str, keyword: str):
             await update_job_status(db, job_id, "completed")
             logger.info(f"Job {job_id} completed successfully")
             
+            # Handle nested crawling if enabled
+            if follow_nested and current_depth < max_depth:
+                await process_nested_urls(db, job_id, keyword, follow_nested, max_depth, current_depth)
+            
         except Exception as e:
             error_msg = f"Internal error: {str(e)}"
             logger.error(f"Error processing job {job_id}: {e}", exc_info=True)
@@ -464,6 +478,122 @@ async def process_crawl_job(job_id: str, url: str, keyword: str):
                 db, job_id, "failed",
                 error=error_msg
             )
+
+
+async def process_nested_urls(
+    db: AsyncSession,
+    parent_job_id: str,
+    keyword: str,
+    follow_nested: bool,
+    max_depth: int,
+    current_depth: int
+):
+    """
+    Process nested URLs found in crawl results automatically.
+    
+    Args:
+        db: Database session
+        parent_job_id: ID of the parent job
+        keyword: Keyword to search for in nested pages
+        follow_nested: Whether to continue following nested URLs
+        max_depth: Maximum crawling depth
+        current_depth: Current depth level
+    """
+    try:
+        logger.info(f"Processing nested URLs for job {parent_job_id} (depth {current_depth + 1}/{max_depth})")
+        
+        # Get results from parent job
+        from database import get_results_by_job_id
+        results = await get_results_by_job_id(db, parent_job_id)
+        
+        # Extract all nested URLs
+        all_nested_urls = set()
+        for result in results:
+            urls = extract_urls_from_text(result.content_snippet, result.page_url)
+            all_nested_urls.update(urls)
+        
+        if not all_nested_urls:
+            logger.info(f"No nested URLs found for job {parent_job_id}")
+            return
+        
+        logger.info(f"Found {len(all_nested_urls)} nested URLs to crawl at depth {current_depth + 1}")
+        
+        # Limit nested URLs to prevent excessive crawling
+        max_nested_urls = 10
+        nested_urls_to_crawl = list(all_nested_urls)[:max_nested_urls]
+        
+        # Create and process jobs for each nested URL
+        for nested_url in nested_urls_to_crawl:
+            try:
+                # Create new job for nested URL
+                nested_job = await create_job(db, nested_url, keyword)
+                logger.info(f"Created nested job {nested_job.id} for URL: {nested_url}")
+                
+                # Process the nested job synchronously (to maintain depth control)
+                await process_crawl_job_sync(
+                    nested_job.id,
+                    nested_url,
+                    keyword,
+                    follow_nested,
+                    max_depth,
+                    current_depth + 1
+                )
+                
+            except Exception as e:
+                logger.error(f"Error processing nested URL {nested_url}: {e}")
+                continue
+        
+        logger.info(f"Completed processing {len(nested_urls_to_crawl)} nested URLs for job {parent_job_id}")
+        
+    except Exception as e:
+        logger.error(f"Error in nested URL processing: {e}", exc_info=True)
+
+
+async def process_crawl_job_sync(
+    job_id: UUID,
+    url: str,
+    keyword: str,
+    follow_nested: bool,
+    max_depth: int,
+    current_depth: int
+):
+    """
+    Synchronous version of process_crawl_job for nested crawling.
+    
+    This ensures nested jobs complete before moving to next level.
+    """
+    from database import AsyncSessionLocal
+    
+    async with AsyncSessionLocal() as db:
+        try:
+            logger.info(f"Processing nested job {job_id} at depth {current_depth}")
+            
+            await update_job_status(db, str(job_id), "in_progress")
+            
+            firecrawl_job_id = await start_firecrawl_job(url, max_retries=3)
+            
+            if not firecrawl_job_id:
+                await update_job_status(db, str(job_id), "failed", error="Failed to start Firecrawl")
+                return
+            
+            await update_job_status(db, str(job_id), "in_progress", firecrawl_job_id=firecrawl_job_id)
+            
+            crawled_data, error_message = await poll_firecrawl_status(firecrawl_job_id, str(job_id))
+            
+            if not crawled_data:
+                await update_job_status(db, str(job_id), "failed", error=error_message or "Failed to retrieve data")
+                return
+            
+            await extract_and_store_results(db, str(job_id), crawled_data, keyword)
+            await update_job_status(db, str(job_id), "completed")
+            
+            # Continue nested crawling if enabled and within depth limit
+            if follow_nested and current_depth < max_depth:
+                await process_nested_urls(db, str(job_id), keyword, follow_nested, max_depth, current_depth)
+            
+        except Exception as e:
+            logger.error(f"Error in nested job {job_id}: {e}", exc_info=True)
+            await update_job_status(db, str(job_id), "failed", error=str(e))
 
 
 async def start_firecrawl_job(url: str, max_retries: int = 3) -> str | None:
@@ -612,181 +742,203 @@ async def poll_firecrawl_status(firecrawl_job_id: str, job_id: str) -> tuple[lis
         return None, error_msg
 
 
-def extract_exam_urls_from_text(text: str, base_url: str) -> List[str]:
+def extract_urls_from_text(text: str, base_url: str) -> List[str]:
     """
-    Extract exam-related URLs from text content.
+    Extract ALL URLs from text content dynamically.
+    
+    No hardcoded keywords - extracts any URL found in the content.
+    User's keyword will determine relevance during crawling.
     
     Args:
         text: Content to search for URLs
         base_url: Base URL of the website for relative URL resolution
         
     Returns:
-        List of unique exam-related URLs
+        List of unique URLs found in the content
     """
     urls_found = set()
+    from urllib.parse import urlparse
+    
+    base_parsed = urlparse(base_url)
+    base_domain = base_parsed.netloc
     
     # Pattern for URLs in markdown links [text](url)
     markdown_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
     for match in re.finditer(markdown_pattern, text):
-        link_text = match.group(1).lower()
         url = match.group(2)
         
-        # Check if it's exam-related
-        exam_keywords = ['exam', 'notification', 'recruitment', 'vacancy', 'advertisement', 'result', 'admit']
-        if any(keyword in link_text for keyword in exam_keywords):
-            # Handle relative URLs
-            if url.startswith('http'):
+        # Skip anchors, javascript, mailto, etc.
+        if url.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+            continue
+            
+        # Handle relative URLs
+        if url.startswith('http'):
+            # Only include URLs from same domain to avoid external links
+            parsed = urlparse(url)
+            if parsed.netloc == base_domain:
                 urls_found.add(url)
-            elif url.startswith('/'):
-                from urllib.parse import urlparse
-                parsed = urlparse(base_url)
-                full_url = f"{parsed.scheme}://{parsed.netloc}{url}"
-                urls_found.add(full_url)
+        elif url.startswith('/'):
+            full_url = f"{base_parsed.scheme}://{base_domain}{url}"
+            urls_found.add(full_url)
     
-    # Pattern for direct URLs
+    # Pattern for direct URLs in text
     url_pattern = r'https?://[^\s\)\]\"\'\<\>]+'
     for match in re.finditer(url_pattern, text):
         url = match.group(0)
-        # Check if URL path contains exam-related keywords
-        if any(keyword in url.lower() for keyword in ['exam', 'notification', 'recruitment', 'vacancy', 'result']):
+        parsed = urlparse(url)
+        # Only include URLs from same domain
+        if parsed.netloc == base_domain:
             urls_found.add(url)
     
     return list(urls_found)
 
 
-def extract_dates_from_text(text: str) -> List[Dict[str, str]]:
+def extract_structured_patterns(text: str) -> List[Dict[str, str]]:
     """
-    Extract dates from text in various formats.
+    Extract structured patterns from text DYNAMICALLY.
     
-    Supports formats like:
-    - DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
-    - DD Month YYYY (e.g., 15 January 2025)
-    - Month DD, YYYY (e.g., January 15, 2025)
-    - YYYY-MM-DD (ISO format)
+    Finds common patterns like:
+    - Dates (multiple formats)
+    - Numbers with context
+    - Structured data (key: value pairs)
+    - Any repeated patterns
+    
+    Completely dynamic - no hardcoded assumptions about what to find.
     
     Returns:
-        List of dictionaries with 'date' and 'context'
+        List of dictionaries with 'pattern', 'value', 'context', 'position'
     """
-    dates_found = []
+    patterns_found = []
     
-    # Pattern 1: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
-    pattern1 = r'\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b'
-    for match in re.finditer(pattern1, text):
-        date_str = match.group(0)
-        start = max(0, match.start() - 50)
-        end = min(len(text), match.end() + 50)
+    # Pattern 1: Date-like patterns (numbers with separators)
+    # Matches: DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, etc.
+    date_pattern = r'\b(\d{1,4}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\b'
+    for match in re.finditer(date_pattern, text):
+        value = match.group(0)
+        start = max(0, match.start() - 100)
+        end = min(len(text), match.end() + 100)
         context = text[start:end].strip()
-        dates_found.append({
-            'date': date_str,
+        patterns_found.append({
+            'pattern': 'date_like',
+            'value': value,
             'context': context,
             'position': match.start()
         })
     
-    # Pattern 2: DD Month YYYY (e.g., 15 January 2025)
-    months = r'(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'
-    pattern2 = rf'\b(\d{{1,2}})\s+({months})\s+(\d{{4}})\b'
-    for match in re.finditer(pattern2, text, re.IGNORECASE):
-        date_str = match.group(0)
-        start = max(0, match.start() - 50)
-        end = min(len(text), match.end() + 50)
+    # Pattern 2: Month names with numbers (flexible date format)
+    month_pattern = r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4})\b'
+    for match in re.finditer(month_pattern, text, re.IGNORECASE):
+        value = match.group(0)
+        start = max(0, match.start() - 100)
+        end = min(len(text), match.end() + 100)
         context = text[start:end].strip()
-        dates_found.append({
-            'date': date_str,
+        patterns_found.append({
+            'pattern': 'date_with_month',
+            'value': value,
             'context': context,
             'position': match.start()
         })
     
-    # Pattern 3: Month DD, YYYY (e.g., January 15, 2025)
-    pattern3 = rf'\b({months})\s+(\d{{1,2}}),?\s+(\d{{4}})\b'
-    for match in re.finditer(pattern3, text, re.IGNORECASE):
-        date_str = match.group(0)
+    # Pattern 3: Key-value pairs (e.g., "Date: 15/01/2025", "Post: Engineer")
+    keyvalue_pattern = r'([A-Za-z\s]+):\s*([^\n\r]{3,50})'
+    for match in re.finditer(keyvalue_pattern, text):
+        key = match.group(1).strip()
+        value = match.group(2).strip()
         start = max(0, match.start() - 50)
         end = min(len(text), match.end() + 50)
         context = text[start:end].strip()
-        dates_found.append({
-            'date': date_str,
+        patterns_found.append({
+            'pattern': 'key_value',
+            'value': f"{key}: {value}",
             'context': context,
             'position': match.start()
         })
     
-    # Pattern 4: YYYY-MM-DD (ISO format)
-    pattern4 = r'\b(\d{4})-(\d{1,2})-(\d{1,2})\b'
-    for match in re.finditer(pattern4, text):
-        date_str = match.group(0)
-        start = max(0, match.start() - 50)
-        end = min(len(text), match.end() + 50)
-        context = text[start:end].strip()
-        dates_found.append({
-            'date': date_str,
-            'context': context,
-            'position': match.start()
-        })
+    # Pattern 4: Numbers with units or context (e.g., "100 posts", "5 years")
+    number_context_pattern = r'\b(\d+)\s+([A-Za-z]+)\b'
+    for match in re.finditer(number_context_pattern, text):
+        value = match.group(0)
+        # Only include if the word after number is meaningful (not just "a", "the", etc.)
+        word = match.group(2).lower()
+        if len(word) > 2 and word not in ['the', 'and', 'for', 'with']:
+            start = max(0, match.start() - 100)
+            end = min(len(text), match.end() + 100)
+            context = text[start:end].strip()
+            patterns_found.append({
+                'pattern': 'number_with_context',
+                'value': value,
+                'context': context,
+                'position': match.start()
+            })
     
     # Sort by position and remove duplicates
-    dates_found.sort(key=lambda x: x['position'])
-    unique_dates = []
-    seen_dates = set()
-    for date_info in dates_found:
-        if date_info['date'] not in seen_dates:
-            seen_dates.add(date_info['date'])
-            unique_dates.append(date_info)
+    patterns_found.sort(key=lambda x: x['position'])
+    unique_patterns = []
+    seen_values = set()
+    for pattern_info in patterns_found:
+        if pattern_info['value'] not in seen_values:
+            seen_values.add(pattern_info['value'])
+            unique_patterns.append(pattern_info)
     
-    return unique_dates
+    return unique_patterns
 
 
-def extract_exam_titles(text: str, dates: List[Dict[str, str]]) -> List[Dict[str, any]]:
+def extract_content_near_patterns(text: str, patterns: List[Dict[str, str]]) -> List[Dict[str, any]]:
     """
-    Extract exam titles associated with dates.
+    Extract meaningful content associated with patterns DYNAMICALLY.
     
-    Looks for exam-related keywords near dates to identify exam titles.
+    Works with ANY pattern (dates, numbers, key-values, etc.)
+    No hardcoded assumptions about content type.
     
     Returns:
-        List of dictionaries with 'title', 'date', and 'context'
+        List of dictionaries with 'title', 'value', 'pattern_type', and 'context'
     """
-    exam_keywords = [
-        'exam', 'examination', 'test', 'recruitment', 'notification',
-        'advertisement', 'vacancy', 'post', 'selection', 'interview',
-        'written test', 'prelims', 'mains', 'tier', 'phase'
-    ]
-    
     results = []
     
-    for date_info in dates:
-        date_str = date_info['date']
-        position = date_info['position']
+    for pattern_info in patterns:
+        value = pattern_info['value']
+        pattern_type = pattern_info['pattern']
+        position = pattern_info['position']
         
-        # Look for exam title in surrounding text (200 chars before and after date)
+        # Look for title in surrounding text (200 chars before and after pattern)
         start = max(0, position - 200)
         end = min(len(text), position + 200)
         surrounding_text = text[start:end]
         
-        # Check if any exam keyword is present
-        has_exam_keyword = any(keyword.lower() in surrounding_text.lower() for keyword in exam_keywords)
+        # Extract potential title (look for lines or sentences near the pattern)
+        lines = surrounding_text.split('\n')
+        title_candidates = []
         
-        if has_exam_keyword:
-            # Extract potential title (look for lines or sentences near the date)
-            lines = surrounding_text.split('\n')
-            title_candidates = []
-            
-            for line in lines:
-                line = line.strip()
-                # Skip very short lines or lines that are just dates
-                if len(line) < 10 or line == date_str:
-                    continue
-                # Check if line contains exam-related keywords
-                if any(keyword.lower() in line.lower() for keyword in exam_keywords):
-                    title_candidates.append(line)
-            
-            # Use the first meaningful title or the context
-            title = title_candidates[0] if title_candidates else surrounding_text[:100].strip()
-            
-            # Clean up the title
-            title = re.sub(r'\s+', ' ', title)  # Remove extra whitespace
-            title = title.replace('|', ' ').replace('*', '').strip()
-            
+        for line in lines:
+            line = line.strip()
+            # Skip very short lines, lines that are just the value, or empty lines
+            if len(line) < 10 or line == value or not line:
+                continue
+            # Skip lines that are just numbers or symbols
+            if re.match(r'^[\d\s\-\.\,\|]+$', line):
+                continue
+            # Add meaningful lines as title candidates
+            title_candidates.append(line)
+        
+        # Use the first meaningful title or extract from context
+        if title_candidates:
+            title = title_candidates[0]
+        else:
+            # Extract first meaningful sentence from context
+            sentences = re.split(r'[.!?\n]+', surrounding_text)
+            meaningful_sentences = [s.strip() for s in sentences if len(s.strip()) > 15]
+            title = meaningful_sentences[0] if meaningful_sentences else surrounding_text[:100].strip()
+        
+        # Clean up the title
+        title = re.sub(r'\s+', ' ', title)  # Remove extra whitespace
+        title = title.replace('|', ' ').replace('*', '').strip()
+        
+        # Only add if we have a meaningful title
+        if title and len(title) > 5:
             results.append({
                 'title': title,
-                'date': date_str,
+                'value': value,
+                'pattern_type': pattern_type,
                 'context': surrounding_text.strip()
             })
     
@@ -936,68 +1088,94 @@ async def extract_and_store_results(
             found, matched_terms = search_keyword_flexible(markdown_content, keyword)
             
             if found:
-                # Extract dates from content
-                dates = extract_dates_from_text(markdown_content)
-                total_dates_found += len(dates)
+                # Extract structured patterns dynamically (dates, numbers, key-values, etc.)
+                patterns = extract_structured_patterns(markdown_content)
+                total_dates_found += len(patterns)
                 
-                # Extract exam titles with dates
-                exam_info = extract_exam_titles(markdown_content, dates)
+                # Extract content near patterns (fully dynamic, works with any pattern)
+                structured_info = extract_content_near_patterns(markdown_content, patterns)
                 
-                # Extract nested exam URLs
-                nested_urls = extract_exam_urls_from_text(markdown_content, page_url)
+                # Extract nested URLs (dynamic, extracts all URLs from same domain)
+                nested_urls = extract_urls_from_text(markdown_content, page_url)
                 
-                # Build structured content snippet
-                if exam_info:
-                    # Format as structured data with dates and titles
-                    content_lines = ["=== EXAM INFORMATION ===\n"]
-                    for idx, info in enumerate(exam_info[:10], 1):  # Limit to 10 entries
-                        content_lines.append(f"{idx}. EXAM: {info['title']}")
-                        content_lines.append(f"   DATE: {info['date']}")
-                        content_lines.append(f"   CONTEXT: {info['context'][:150]}...")
-                        content_lines.append("")
+                # Store each structured item as a separate key-value pair
+                if structured_info:
+                    for info in structured_info:
+                        # Extract key (title) and value
+                        data_key = info['title']
+                        data_value = info['value']
+                        
+                        # Determine if value is long format or short
+                        # Long format: store full context, Short format: store just the value
+                        if len(data_value) > 100:
+                            # Long format - store full context
+                            stored_value = f"{data_value}\n\nContext: {info['context'][:200]}"
+                        else:
+                            # Short format - store just the value
+                            stored_value = data_value
+                        
+                        # Build content snippet for display
+                        content_snippet = f"KEY: {data_key}\nVALUE: {stored_value}\nTYPE: {info['pattern_type']}"
+                        
+                        # Store as individual result with key-value pairs
+                        await create_result(
+                            db,
+                            job_id=job_id,
+                            page_url=page_url,
+                            page_title=page_title or "No Title",
+                            content_snippet=content_snippet,
+                            data_key=data_key,
+                            data_value=stored_value
+                        )
+                        matches_found += 1
                     
-                    if len(exam_info) > 10:
-                        content_lines.append(f"... and {len(exam_info) - 10} more exam(s)")
+                    logger.info(f"✓ Stored {len(structured_info)} key-value pairs from: {page_url}")
                     
-                    # Add nested URLs if found
-                    if nested_urls:
-                        content_lines.append("\n=== NESTED EXAM URLS FOUND ===")
-                        for idx, url in enumerate(nested_urls[:5], 1):
-                            content_lines.append(f"{idx}. {url}")
-                        if len(nested_urls) > 5:
-                            content_lines.append(f"... and {len(nested_urls) - 5} more URL(s)")
+                elif patterns:
+                    # Has patterns but no clear titles - store with generic keys
+                    for idx, pattern_info in enumerate(patterns[:10], 1):
+                        data_key = f"Pattern {idx} ({pattern_info['pattern']})"
+                        data_value = pattern_info['value']
+                        
+                        # Determine storage format
+                        if len(data_value) > 100:
+                            stored_value = f"{data_value}\n\nContext: {pattern_info['context'][:200]}"
+                        else:
+                            stored_value = data_value
+                        
+                        content_snippet = f"KEY: {data_key}\nVALUE: {stored_value}\nCONTEXT: {pattern_info['context'][:150]}"
+                        
+                        await create_result(
+                            db,
+                            job_id=job_id,
+                            page_url=page_url,
+                            page_title=page_title or "No Title",
+                            content_snippet=content_snippet,
+                            data_key=data_key,
+                            data_value=stored_value
+                        )
+                        matches_found += 1
                     
-                    content_snippet = "\n".join(content_lines)
-                    logger.info(f"✓ Found {len(exam_info)} exam(s) with dates and {len(nested_urls)} nested URLs in: {page_url}")
-                    
-                elif dates:
-                    # Has dates but no clear exam titles
-                    content_lines = ["=== DATES FOUND ===\n"]
-                    for idx, date_info in enumerate(dates[:10], 1):
-                        content_lines.append(f"{idx}. DATE: {date_info['date']}")
-                        content_lines.append(f"   CONTEXT: {date_info['context'][:150]}...")
-                        content_lines.append("")
-                    
-                    if len(dates) > 10:
-                        content_lines.append(f"... and {len(dates) - 10} more date(s)")
-                    
-                    content_snippet = "\n".join(content_lines)
-                    logger.info(f"✓ Found {len(dates)} date(s) in: {page_url}")
+                    logger.info(f"✓ Stored {len(patterns[:10])} pattern entries from: {page_url}")
                     
                 else:
-                    # Keyword match but no dates - use context extraction
-                    content_snippet = extract_context_around_keyword(markdown_content, keyword, context_chars=300)
-                    logger.info(f"✓ Keyword match (no dates) in: {page_url}")
-                
-                # Store the result
-                await create_result(
-                    db,
-                    job_id=job_id,
-                    page_url=page_url,
-                    page_title=page_title or "No Title",
-                    content_snippet=content_snippet
-                )
-                matches_found += 1
+                    # Keyword match but no patterns - store with keyword context
+                    data_key = f"Keyword Match: {keyword}"
+                    data_value = extract_context_around_keyword(markdown_content, keyword, context_chars=300)
+                    
+                    content_snippet = f"KEY: {data_key}\nVALUE: {data_value}"
+                    
+                    await create_result(
+                        db,
+                        job_id=job_id,
+                        page_url=page_url,
+                        page_title=page_title or "No Title",
+                        content_snippet=content_snippet,
+                        data_key=data_key,
+                        data_value=data_value
+                    )
+                    matches_found += 1
+                    logger.info(f"✓ Stored keyword match from: {page_url}")
                 
             else:
                 logger.debug(f"No match in: {page_url}")
