@@ -19,6 +19,8 @@ from config import settings
 from auth import verify_api_key
 from schemas import CrawlRequest, CrawlResponse, CrawlStatusResponse, ResultItem, ErrorResponse
 from regex_extractor import get_extractor, extract_with_regex
+from nested_scraper import get_nested_scraper
+from document_extractor import get_document_extractor
 
 # Configure logging
 logging.basicConfig(
@@ -461,16 +463,15 @@ async def process_crawl_job(
                 )
                 return
             
-            # Extract pages containing keyword
-            await extract_and_store_results(db, job_id, crawled_data, keyword)
+            # Extract pages containing keyword (with nested scraping support)
+            await extract_and_store_results(
+                db, job_id, crawled_data, keyword,
+                follow_nested, max_depth, current_depth
+            )
             
             # Mark job as completed
             await update_job_status(db, job_id, "completed")
             logger.info(f"Job {job_id} completed successfully")
-            
-            # Handle nested crawling if enabled
-            if follow_nested and current_depth < max_depth:
-                await process_nested_urls(db, job_id, keyword, follow_nested, max_depth, current_depth)
             
         except Exception as e:
             error_msg = f"Internal error: {str(e)}"
@@ -481,56 +482,46 @@ async def process_crawl_job(
             )
 
 
-async def process_nested_urls(
+async def process_nested_web_pages(
     db: AsyncSession,
     parent_job_id: str,
+    nested_urls: List[str],
     keyword: str,
     follow_nested: bool,
     max_depth: int,
     current_depth: int
 ):
     """
-    Process nested URLs found in crawl results automatically.
+    Process nested web page URLs by creating new crawl jobs.
     
     Args:
         db: Database session
         parent_job_id: ID of the parent job
-        keyword: Keyword to search for in nested pages
+        nested_urls: List of URLs to crawl
+        keyword: Keyword to search for
         follow_nested: Whether to continue following nested URLs
         max_depth: Maximum crawling depth
         current_depth: Current depth level
     """
     try:
-        logger.info(f"Processing nested URLs for job {parent_job_id} (depth {current_depth + 1}/{max_depth})")
+        logger.info(f"Creating crawl jobs for {len(nested_urls)} nested URLs (depth {current_depth + 1}/{max_depth})")
         
-        # Get results from parent job
-        from database import get_results_by_job_id
-        results = await get_results_by_job_id(db, parent_job_id)
-        
-        # Extract all nested URLs
-        all_nested_urls = set()
-        for result in results:
-            urls = extract_urls_from_text(result.content_snippet, result.page_url)
-            all_nested_urls.update(urls)
-        
-        if not all_nested_urls:
-            logger.info(f"No nested URLs found for job {parent_job_id}")
-            return
-        
-        logger.info(f"Found {len(all_nested_urls)} nested URLs to crawl at depth {current_depth + 1}")
-        
-        # Limit nested URLs to prevent excessive crawling
-        max_nested_urls = 10
-        nested_urls_to_crawl = list(all_nested_urls)[:max_nested_urls]
-        
-        # Create and process jobs for each nested URL
-        for nested_url in nested_urls_to_crawl:
+        for nested_url in nested_urls:
             try:
+                # Check if already scraped
+                nested_scraper = get_nested_scraper()
+                if nested_scraper.is_url_scraped(nested_url):
+                    logger.info(f"Skipping already scraped URL: {nested_url}")
+                    continue
+                
                 # Create new job for nested URL
                 nested_job = await create_job(db, nested_url, keyword)
                 logger.info(f"Created nested job {nested_job.id} for URL: {nested_url}")
                 
-                # Process the nested job synchronously (to maintain depth control)
+                # Mark as scraped
+                nested_scraper.mark_url_scraped(nested_url)
+                
+                # Process the nested job
                 await process_crawl_job_sync(
                     nested_job.id,
                     nested_url,
@@ -544,10 +535,35 @@ async def process_nested_urls(
                 logger.error(f"Error processing nested URL {nested_url}: {e}")
                 continue
         
-        logger.info(f"Completed processing {len(nested_urls_to_crawl)} nested URLs for job {parent_job_id}")
+        logger.info(f"Completed processing nested web pages for job {parent_job_id}")
         
     except Exception as e:
-        logger.error(f"Error in nested URL processing: {e}", exc_info=True)
+        logger.error(f"Error in nested web page processing: {e}", exc_info=True)
+
+
+async def process_nested_urls(
+    db: AsyncSession,
+    parent_job_id: str,
+    keyword: str,
+    follow_nested: bool,
+    max_depth: int,
+    current_depth: int
+):
+    """
+    Process nested URLs found in crawl results automatically.
+    
+    DEPRECATED: This function is kept for backward compatibility.
+    Use extract_and_store_results with follow_nested=True instead.
+    
+    Args:
+        db: Database session
+        parent_job_id: ID of the parent job
+        keyword: Keyword to search for in nested pages
+        follow_nested: Whether to continue following nested URLs
+        max_depth: Maximum crawling depth
+        current_depth: Current depth level
+    """
+    logger.warning("process_nested_urls is deprecated. Nested scraping is now handled in extract_and_store_results")
 
 
 async def process_crawl_job_sync(
@@ -585,12 +601,11 @@ async def process_crawl_job_sync(
                 await update_job_status(db, str(job_id), "failed", error=error_message or "Failed to retrieve data")
                 return
             
-            await extract_and_store_results(db, str(job_id), crawled_data, keyword)
+            await extract_and_store_results(
+                db, str(job_id), crawled_data, keyword,
+                follow_nested, max_depth, current_depth
+            )
             await update_job_status(db, str(job_id), "completed")
-            
-            # Continue nested crawling if enabled and within depth limit
-            if follow_nested and current_depth < max_depth:
-                await process_nested_urls(db, str(job_id), keyword, follow_nested, max_depth, current_depth)
             
         except Exception as e:
             logger.error(f"Error in nested job {job_id}: {e}", exc_info=True)
@@ -1047,7 +1062,10 @@ async def extract_and_store_results(
     db: AsyncSession,
     job_id: str,
     crawled_data: list,
-    keyword: str
+    keyword: str,
+    follow_nested: bool = False,
+    max_depth: int = 1,
+    current_depth: int = 0
 ):
     """
     Extract pages containing keyword using dynamic regex patterns from .env.
@@ -1057,22 +1075,33 @@ async def extract_and_store_results(
     - Fully dynamic - no hardcoded extraction logic
     - Supports multiple regex patterns simultaneously
     - Extracts key-value pairs based on configured patterns
+    - Automatically scrapes nested URLs found in regex matches
+    - Extracts content from documents (.pdf, .xlsx, etc.)
     
     Args:
         db: Database session
         job_id: Crawl job ID
         crawled_data: List of crawled pages from Firecrawl
         keyword: Keyword or phrase to search for
+        follow_nested: Whether to follow nested URLs
+        max_depth: Maximum depth for nested scraping
+        current_depth: Current depth level
     """
     matches_found = 0
     pages_processed = 0
     total_patterns_found = 0
     
-    # Get regex extractor instance
+    # Get extractor instances
     extractor = get_extractor()
+    nested_scraper = get_nested_scraper()
     
-    logger.info(f"Job {job_id}: Processing {len(crawled_data)} pages for keyword '{keyword}'")
+    # Track all nested URLs found
+    all_nested_web_pages = set()
+    all_nested_documents = set()
+    
+    logger.info(f"Job {job_id}: Processing {len(crawled_data)} pages for keyword '{keyword}' (depth {current_depth}/{max_depth})")
     logger.info(f"Regex extraction enabled: {extractor.enabled}")
+    logger.info(f"Nested scraping enabled: {follow_nested}")
     
     for page in crawled_data:
         try:
@@ -1097,7 +1126,20 @@ async def extract_and_store_results(
                 
                 # Extract structured data using regex patterns from .env
                 if extractor.enabled:
+                    # Get raw matches for nested URL extraction
+                    raw_extracted = extract_with_regex(markdown_content, output_format='raw')
                     extracted_data = extract_with_regex(markdown_content, output_format='keyvalue')
+                    
+                    # Extract nested URLs from regex matches if enabled
+                    if follow_nested and current_depth < max_depth and raw_extracted.get('matches'):
+                        nested_urls = nested_scraper.extract_urls_from_regex_matches(
+                            raw_extracted['matches'],
+                            page_url
+                        )
+                        all_nested_web_pages.update(nested_urls['web_pages'])
+                        all_nested_documents.update(nested_urls['documents'])
+                        
+                        logger.info(f"  → Found {len(nested_urls['web_pages'])} nested pages and {len(nested_urls['documents'])} documents")
                     
                     if extracted_data.get('enabled') and extracted_data.get('data'):
                         key_value_pairs = extracted_data['data']
@@ -1172,6 +1214,28 @@ async def extract_and_store_results(
             continue
     
     logger.info(f"Job {job_id}: Processed {pages_processed} pages, found {matches_found} matches with {total_patterns_found} regex patterns extracted")
+    
+    # Process nested URLs if enabled
+    if follow_nested and current_depth < max_depth:
+        # Process documents first (they don't create new crawl jobs)
+        if all_nested_documents:
+            logger.info(f"Processing {len(all_nested_documents)} nested documents...")
+            for doc_url in list(all_nested_documents)[:20]:  # Limit to 20 documents
+                try:
+                    await nested_scraper.process_document_url(
+                        db, job_id, doc_url, keyword, ""
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing document {doc_url}: {e}")
+                    continue
+        
+        # Process nested web pages (create new crawl jobs)
+        if all_nested_web_pages:
+            logger.info(f"Processing {len(all_nested_web_pages)} nested web pages...")
+            await process_nested_web_pages(
+                db, job_id, list(all_nested_web_pages)[:10],  # Limit to 10 pages
+                keyword, follow_nested, max_depth, current_depth
+            )
 
 
 if __name__ == "__main__":

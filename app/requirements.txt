@@ -6,3 +6,10 @@ httpx==0.27.2
 pydantic==2.9.2
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
+
+# Document extraction libraries
+PyPDF2==3.0.1
+openpyxl==3.1.2
+python-docx==1.1.0
+odfpy==1.4.1
+striprtf==0.0.26
