@@ -42,9 +42,49 @@ class Settings(BaseSettings):
     crawl_timeout_seconds: int = 300  # 5 minutes
     polling_interval_seconds: int = 5
     
+    # Regex Extraction Configuration
+    enable_regex_extraction: bool = os.getenv("ENABLE_REGEX_EXTRACTION", "true").lower() == "true"
+    regex_context_chars: int = int(os.getenv("REGEX_CONTEXT_CHARS", "200"))
+    
+    def get_all_regex_patterns(self) -> dict:
+        """
+        Dynamically get all regex patterns from environment variables.
+        
+        Automatically detects any environment variable starting with 'REGEX_PATTERN_'
+        and loads it as a pattern. This allows developers to add new patterns
+        without modifying code - just add to .env and restart!
+        
+        Pattern naming convention:
+        - REGEX_PATTERN_<NAME> in .env becomes pattern name '<name>' (lowercase)
+        - Example: REGEX_PATTERN_SALARY becomes 'salary'
+        - Example: REGEX_PATTERN_PHONE_NUMBER becomes 'phone_number'
+        
+        Returns:
+            Dictionary with pattern_name: regex_pattern
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        patterns = {}
+        
+        # Automatically detect all REGEX_PATTERN_* environment variables
+        for env_key, env_value in os.environ.items():
+            if env_key.startswith("REGEX_PATTERN_") and env_value:
+                # Extract pattern name from environment variable
+                # REGEX_PATTERN_DATE -> date
+                # REGEX_PATTERN_EXAM_CODE -> exam_code
+                pattern_name = env_key.replace("REGEX_PATTERN_", "").lower()
+                patterns[pattern_name] = env_value
+                logger.debug(f"Loaded regex pattern '{pattern_name}' from {env_key}")
+        
+        logger.info(f"Loaded {len(patterns)} regex patterns from environment")
+        
+        return patterns
+    
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"  # Ignore extra fields from .env
 
 
 # Create global settings instance

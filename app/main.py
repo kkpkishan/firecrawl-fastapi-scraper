@@ -18,6 +18,7 @@ from database import init_db, close_db, check_db_connection, get_db, create_job,
 from config import settings
 from auth import verify_api_key
 from schemas import CrawlRequest, CrawlResponse, CrawlStatusResponse, ResultItem, ErrorResponse
+from regex_extractor import get_extractor, extract_with_regex
 
 # Configure logging
 logging.basicConfig(
@@ -1049,13 +1050,13 @@ async def extract_and_store_results(
     keyword: str
 ):
     """
-    Extract pages containing keyword with intelligent date and title extraction.
+    Extract pages containing keyword using dynamic regex patterns from .env.
     
     Features:
-    - Flexible keyword matching (exact, multi-word, partial)
-    - Automatic date extraction (multiple formats)
-    - Exam title extraction near dates
-    - Structured data output with dates and titles
+    - Uses regex patterns configured in .env file
+    - Fully dynamic - no hardcoded extraction logic
+    - Supports multiple regex patterns simultaneously
+    - Extracts key-value pairs based on configured patterns
     
     Args:
         db: Database session
@@ -1065,9 +1066,13 @@ async def extract_and_store_results(
     """
     matches_found = 0
     pages_processed = 0
-    total_dates_found = 0
+    total_patterns_found = 0
+    
+    # Get regex extractor instance
+    extractor = get_extractor()
     
     logger.info(f"Job {job_id}: Processing {len(crawled_data)} pages for keyword '{keyword}'")
+    logger.info(f"Regex extraction enabled: {extractor.enabled}")
     
     for page in crawled_data:
         try:
@@ -1088,62 +1093,48 @@ async def extract_and_store_results(
             found, matched_terms = search_keyword_flexible(markdown_content, keyword)
             
             if found:
-                # Extract structured patterns dynamically (dates, numbers, key-values, etc.)
-                patterns = extract_structured_patterns(markdown_content)
-                total_dates_found += len(patterns)
+                logger.info(f"✓ Keyword '{keyword}' found in: {page_url}")
                 
-                # Extract content near patterns (fully dynamic, works with any pattern)
-                structured_info = extract_content_near_patterns(markdown_content, patterns)
-                
-                # Extract nested URLs (dynamic, extracts all URLs from same domain)
-                nested_urls = extract_urls_from_text(markdown_content, page_url)
-                
-                # Store each structured item as a separate key-value pair
-                if structured_info:
-                    for info in structured_info:
-                        # Extract key (title) and value
-                        data_key = info['title']
-                        data_value = info['value']
-                        
-                        # Determine if value is long format or short
-                        # Long format: store full context, Short format: store just the value
-                        if len(data_value) > 100:
-                            # Long format - store full context
-                            stored_value = f"{data_value}\n\nContext: {info['context'][:200]}"
-                        else:
-                            # Short format - store just the value
-                            stored_value = data_value
-                        
-                        # Build content snippet for display
-                        content_snippet = f"KEY: {data_key}\nVALUE: {stored_value}\nTYPE: {info['pattern_type']}"
-                        
-                        # Store as individual result with key-value pairs
-                        await create_result(
-                            db,
-                            job_id=job_id,
-                            page_url=page_url,
-                            page_title=page_title or "No Title",
-                            content_snippet=content_snippet,
-                            data_key=data_key,
-                            data_value=stored_value
-                        )
-                        matches_found += 1
+                # Extract structured data using regex patterns from .env
+                if extractor.enabled:
+                    extracted_data = extract_with_regex(markdown_content, output_format='keyvalue')
                     
-                    logger.info(f"✓ Stored {len(structured_info)} key-value pairs from: {page_url}")
-                    
-                elif patterns:
-                    # Has patterns but no clear titles - store with generic keys
-                    for idx, pattern_info in enumerate(patterns[:10], 1):
-                        data_key = f"Pattern {idx} ({pattern_info['pattern']})"
-                        data_value = pattern_info['value']
+                    if extracted_data.get('enabled') and extracted_data.get('data'):
+                        key_value_pairs = extracted_data['data']
+                        total_patterns_found += len(key_value_pairs)
                         
-                        # Determine storage format
-                        if len(data_value) > 100:
-                            stored_value = f"{data_value}\n\nContext: {pattern_info['context'][:200]}"
-                        else:
-                            stored_value = data_value
+                        # Store each extracted key-value pair
+                        for item in key_value_pairs:
+                            data_key = item['key']
+                            data_value = item['value']
+                            pattern_type = item.get('pattern_type', 'unknown')
+                            context = item.get('context', '')
+                            
+                            # Build content snippet for display
+                            content_snippet = f"KEY: {data_key}\nVALUE: {data_value}\nTYPE: {pattern_type}"
+                            if context:
+                                content_snippet += f"\nCONTEXT: {context}"
+                            
+                            # Store as individual result with key-value pairs
+                            await create_result(
+                                db,
+                                job_id=job_id,
+                                page_url=page_url,
+                                page_title=page_title or "No Title",
+                                content_snippet=content_snippet,
+                                data_key=data_key,
+                                data_value=data_value
+                            )
+                            matches_found += 1
                         
-                        content_snippet = f"KEY: {data_key}\nVALUE: {stored_value}\nCONTEXT: {pattern_info['context'][:150]}"
+                        logger.info(f"  → Extracted {len(key_value_pairs)} patterns using regex from .env")
+                    else:
+                        # No patterns matched, store keyword context
+                        logger.info(f"  → No regex patterns matched, storing keyword context")
+                        data_key = f"Keyword Match: {keyword}"
+                        data_value = extract_context_around_keyword(markdown_content, keyword, context_chars=300)
+                        
+                        content_snippet = f"KEY: {data_key}\nVALUE: {data_value}"
                         
                         await create_result(
                             db,
@@ -1152,14 +1143,12 @@ async def extract_and_store_results(
                             page_title=page_title or "No Title",
                             content_snippet=content_snippet,
                             data_key=data_key,
-                            data_value=stored_value
+                            data_value=data_value
                         )
                         matches_found += 1
-                    
-                    logger.info(f"✓ Stored {len(patterns[:10])} pattern entries from: {page_url}")
-                    
                 else:
-                    # Keyword match but no patterns - store with keyword context
+                    # Regex extraction disabled, store keyword context only
+                    logger.info(f"  → Regex extraction disabled, storing keyword context")
                     data_key = f"Keyword Match: {keyword}"
                     data_value = extract_context_around_keyword(markdown_content, keyword, context_chars=300)
                     
@@ -1175,16 +1164,14 @@ async def extract_and_store_results(
                         data_value=data_value
                     )
                     matches_found += 1
-                    logger.info(f"✓ Stored keyword match from: {page_url}")
-                
             else:
-                logger.debug(f"No match in: {page_url}")
+                logger.debug(f"No keyword match in: {page_url}")
                 
         except Exception as e:
             logger.error(f"Error processing page {page_url}: {e}", exc_info=True)
             continue
     
-    logger.info(f"Job {job_id}: Processed {pages_processed} pages, found {matches_found} matches with {total_dates_found} total dates for keyword '{keyword}'")
+    logger.info(f"Job {job_id}: Processed {pages_processed} pages, found {matches_found} matches with {total_patterns_found} regex patterns extracted")
 
 
 if __name__ == "__main__":
