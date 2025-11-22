@@ -7,7 +7,7 @@ understanding and extraction of structured data from web content.
 import json
 import logging
 import re
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, List
 import boto3
 from botocore.exceptions import ClientError, BotoCoreError
 from config import settings
@@ -470,3 +470,92 @@ async def extract_with_bedrock(
     """
     extractor = get_extractor()
     return await extractor.extract_structured_data(content, metadata)
+
+
+
+def validate_extraction_schema(data: dict) -> Tuple[bool, List[str]]:
+    """
+    Validate extracted data against the expected schema.
+    
+    Args:
+        data: Extracted data dictionary from LLM
+        
+    Returns:
+        Tuple of (is_valid, error_messages)
+    """
+    errors = []
+    
+    if not isinstance(data, dict):
+        errors.append("Data must be a dictionary")
+        return False, errors
+    
+    # Check required top-level fields
+    required_fields = ['page_info', 'extracted_fields', 'dates', 'metadata']
+    for field in required_fields:
+        if field not in data:
+            errors.append(f"Missing required field: {field}")
+    
+    # Validate page_info
+    if 'page_info' in data:
+        page_info = data['page_info']
+        if not isinstance(page_info, dict):
+            errors.append("page_info must be a dictionary")
+        else:
+            required_page_fields = ['title', 'url', 'summary']
+            for field in required_page_fields:
+                if field not in page_info:
+                    errors.append(f"page_info missing required field: {field}")
+                elif not isinstance(page_info[field], str):
+                    errors.append(f"page_info.{field} must be a string")
+    
+    # Validate extracted_fields array
+    if 'extracted_fields' in data:
+        if not isinstance(data['extracted_fields'], list):
+            errors.append("extracted_fields must be an array")
+        else:
+            for i, field in enumerate(data['extracted_fields']):
+                if not isinstance(field, dict):
+                    errors.append(f"extracted_fields[{i}] must be an object")
+                    continue
+                required = ['key', 'value', 'confidence', 'context']
+                for req in required:
+                    if req not in field:
+                        errors.append(f"extracted_fields[{i}] missing field: {req}")
+                
+                # Validate confidence values
+                if 'confidence' in field:
+                    valid_confidence = ['high', 'medium', 'low']
+                    if field['confidence'] not in valid_confidence:
+                        errors.append(f"extracted_fields[{i}].confidence must be one of: {valid_confidence}")
+    
+    # Validate dates array
+    if 'dates' in data:
+        if not isinstance(data['dates'], list):
+            errors.append("dates must be an array")
+        else:
+            for i, date in enumerate(data['dates']):
+                if not isinstance(date, dict):
+                    errors.append(f"dates[{i}] must be an object")
+                    continue
+                
+                required_date_fields = ['label', 'value', 'context']
+                for field in required_date_fields:
+                    if field not in date:
+                        errors.append(f"dates[{i}] missing field: {field}")
+                
+                # Validate ISO 8601 date format (YYYY-MM-DD)
+                if 'value' in date:
+                    if not re.match(r'^\d{4}-\d{2}-\d{2}$', str(date['value'])):
+                        errors.append(f"dates[{i}].value must be in ISO 8601 format (YYYY-MM-DD)")
+    
+    # Validate metadata
+    if 'metadata' in data:
+        if not isinstance(data['metadata'], dict):
+            errors.append("metadata must be a dictionary")
+        else:
+            required_meta_fields = ['extraction_timestamp', 'model_used', 'content_type']
+            for field in required_meta_fields:
+                if field not in data['metadata']:
+                    errors.append(f"metadata missing required field: {field}")
+    
+    return len(errors) == 0, errors
