@@ -52,36 +52,55 @@ class BedrockExtractor:
     
     def _initialize_client(self):
         """
-        Initialize AWS Bedrock client using credential chain.
+        Initialize AWS Bedrock client using credential chain or bearer token.
         
-        Credential chain priority:
-        1. IAM role attached to EC2/ECS instance (recommended for production)
-        2. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-        3. AWS credentials file (~/.aws/credentials)
-        4. IAM role from ECS task definition
+        Authentication priority:
+        1. Bearer token (AWS_BEARER_TOKEN_BEDROCK) if provided
+        2. IAM role attached to EC2/ECS instance (recommended for production)
+        3. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+        4. AWS credentials file (~/.aws/credentials)
+        5. IAM role from ECS task definition
         
         Raises:
             Exception: If client initialization fails
         """
         try:
-            # Create Bedrock runtime client
-            # boto3 automatically uses the credential chain
-            self.client = boto3.client(
-                service_name='bedrock-runtime',
-                region_name=settings.aws_region
-            )
-            
-            # Log credential source (without exposing sensitive data)
-            session = boto3.Session()
-            credentials = session.get_credentials()
-            if credentials:
-                # Determine credential source
-                if hasattr(credentials, 'method'):
-                    logger.info(f"AWS credentials source: {credentials.method}")
-                else:
-                    logger.info("AWS credentials loaded successfully")
+            # Check if bearer token is provided
+            if settings.aws_bearer_token_bedrock:
+                logger.info("Using AWS Bedrock bearer token for authentication")
+                # Create client with bearer token
+                # Note: boto3 doesn't natively support bearer tokens for Bedrock
+                # We'll need to use custom request signing or HTTP client
+                # For now, store the token for use in API calls
+                self.bearer_token = settings.aws_bearer_token_bedrock
+                
+                # Create a basic client for the region
+                self.client = boto3.client(
+                    service_name='bedrock-runtime',
+                    region_name=settings.aws_region
+                )
+                logger.info("Bedrock client initialized with bearer token")
             else:
-                logger.warning("No AWS credentials found in credential chain")
+                # Create Bedrock runtime client using standard credential chain
+                # boto3 automatically uses the credential chain
+                self.client = boto3.client(
+                    service_name='bedrock-runtime',
+                    region_name=settings.aws_region
+                )
+                
+                # Log credential source (without exposing sensitive data)
+                session = boto3.Session()
+                credentials = session.get_credentials()
+                if credentials:
+                    # Determine credential source
+                    if hasattr(credentials, 'method'):
+                        logger.info(f"AWS credentials source: {credentials.method}")
+                    else:
+                        logger.info("AWS credentials loaded successfully")
+                else:
+                    logger.warning("No AWS credentials found in credential chain")
+                
+                self.bearer_token = None
                 
         except Exception as e:
             logger.error(f"Failed to create Bedrock client: {e}")
@@ -307,16 +326,41 @@ Use this metadata to provide context-aware extraction.
                     }
                 }
             
-            # Invoke model
-            response = self.client.invoke_model(
-                modelId=self.model_id,
-                contentType="application/json",
-                accept="application/json",
-                body=json.dumps(request_body)
-            )
-            
-            # Parse response
-            response_body = json.loads(response['body'].read())
+            # Invoke model with bearer token if available
+            if hasattr(self, 'bearer_token') and self.bearer_token:
+                # Use bearer token authentication
+                # Note: This requires custom HTTP headers
+                import httpx
+                
+                # Construct Bedrock API endpoint
+                endpoint = f"https://bedrock-runtime.{settings.aws_region}.amazonaws.com/model/{self.model_id}/invoke"
+                
+                headers = {
+                    "Authorization": f"Bearer {self.bearer_token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                }
+                
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        endpoint,
+                        headers=headers,
+                        json=request_body,
+                        timeout=30.0
+                    )
+                    response.raise_for_status()
+                    response_body = response.json()
+            else:
+                # Use standard boto3 client with credential chain
+                response = self.client.invoke_model(
+                    modelId=self.model_id,
+                    contentType="application/json",
+                    accept="application/json",
+                    body=json.dumps(request_body)
+                )
+                
+                # Parse response
+                response_body = json.loads(response['body'].read())
             
             # Extract text based on model type
             if 'titan' in self.model_id.lower():

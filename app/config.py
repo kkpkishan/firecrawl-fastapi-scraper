@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     bedrock_max_tokens: int = int(os.getenv("BEDROCK_MAX_TOKENS", "4096"))
     enable_bedrock_extraction: bool = os.getenv("ENABLE_BEDROCK_EXTRACTION", "false").lower() == "true"
     
+    # AWS Bedrock Bearer Token (alternative authentication)
+    aws_bearer_token_bedrock: str = os.getenv("AWS_BEARER_TOKEN_BEDROCK", "")
+    
     # Bedrock retry configuration
     bedrock_max_retries: int = 2
     bedrock_retry_delay: float = 1.0

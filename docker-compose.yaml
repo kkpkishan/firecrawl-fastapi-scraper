@@ -23,6 +23,8 @@ services:
       # AWS Credentials (optional - for development only, use IAM role in production)
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      # AWS Bedrock Bearer Token (alternative authentication)
+      - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK:-}
     depends_on:
       - nuq-postgres
       - firecrawl-api
