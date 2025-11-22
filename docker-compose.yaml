@@ -14,6 +14,15 @@ services:
       - DB_URL=postgresql+asyncpg://postgres:postgres@nuq-postgres:5432/postgres
       - FIRECRAWL_API_URL=http://firecrawl-api:3002
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # AWS Bedrock Configuration
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-amazon.titan-text-express-v1}
+      - BEDROCK_TEMPERATURE=${BEDROCK_TEMPERATURE:-0.0}
+      - BEDROCK_MAX_TOKENS=${BEDROCK_MAX_TOKENS:-4096}
+      - ENABLE_BEDROCK_EXTRACTION=${ENABLE_BEDROCK_EXTRACTION:-false}
+      # AWS Credentials (optional - for development only, use IAM role in production)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
     depends_on:
       - nuq-postgres
       - firecrawl-api
