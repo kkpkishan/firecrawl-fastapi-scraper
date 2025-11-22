@@ -113,7 +113,7 @@ class BedrockExtractor:
         schema_hint: Optional[str] = None
     ) -> Tuple[Optional[Dict], Optional[str]]:
         """
-        Extract structured data from content using LLM.
+        Extract structured data from content using LLM with retry logic.
         
         Args:
             content: Text content to extract from (markdown format)
@@ -134,25 +134,55 @@ class BedrockExtractor:
         if not self.client:
             return None, "Bedrock client not initialized"
         
-        # Build the prompt
+        # Build the initial prompt
         prompt = self._build_prompt(content, metadata)
         
-        # Invoke LLM
-        try:
-            response_text = await self._invoke_bedrock(prompt)
-            
-            # Parse and validate response
-            extracted_data, parse_error = self._parse_llm_response(response_text)
-            
-            if parse_error:
-                return None, f"Failed to parse LLM response: {parse_error}"
-            
-            return extracted_data, None
-            
-        except Exception as e:
-            error_msg = f"Bedrock extraction failed: {str(e)}"
-            logger.error(error_msg)
-            return None, error_msg
+        # Try extraction with retries
+        for attempt in range(self.max_retries + 1):
+            try:
+                # Invoke LLM
+                response_text = await self._invoke_bedrock(prompt)
+                
+                # Parse response
+                extracted_data, parse_error = self._parse_llm_response(response_text)
+                
+                if parse_error:
+                    if attempt < self.max_retries:
+                        logger.warning(f"Parse error on attempt {attempt + 1}: {parse_error}")
+                        # Construct fix prompt
+                        prompt = self._build_fix_prompt(response_text, parse_error, content, metadata)
+                        continue
+                    else:
+                        return None, f"Failed to parse LLM response after {self.max_retries + 1} attempts: {parse_error}"
+                
+                # Validate schema
+                is_valid, validation_errors = validate_extraction_schema(extracted_data)
+                
+                if not is_valid:
+                    if attempt < self.max_retries:
+                        logger.warning(f"Validation failed on attempt {attempt + 1}: {validation_errors}")
+                        # Construct fix prompt with validation errors
+                        prompt = self._build_validation_fix_prompt(extracted_data, validation_errors, content, metadata)
+                        continue
+                    else:
+                        error_msg = f"Schema validation failed after {self.max_retries + 1} attempts: {'; '.join(validation_errors)}"
+                        return None, error_msg
+                
+                # Success!
+                if attempt > 0:
+                    logger.info(f"Extraction succeeded on attempt {attempt + 1}")
+                return extracted_data, None
+                
+            except Exception as e:
+                if attempt < self.max_retries:
+                    logger.warning(f"Extraction error on attempt {attempt + 1}: {e}")
+                    continue
+                else:
+                    error_msg = f"Bedrock extraction failed after {self.max_retries + 1} attempts: {str(e)}"
+                    logger.error(error_msg)
+                    return None, error_msg
+        
+        return None, "Extraction failed: max retries exhausted"
     
     def _build_prompt(self, content: str, metadata: Dict[str, Any]) -> str:
         """
@@ -559,3 +589,70 @@ def validate_extraction_schema(data: dict) -> Tuple[bool, List[str]]:
                     errors.append(f"metadata missing required field: {field}")
     
     return len(errors) == 0, errors
+
+    
+    def _build_fix_prompt(self, previous_response: str, error: str, content: str, metadata: Dict[str, Any]) -> str:
+        """
+        Build a fix prompt for JSON parsing errors.
+        
+        Args:
+            previous_response: The previous LLM response that failed
+            error: The parsing error message
+            content: Original content
+            metadata: Original metadata
+            
+        Returns:
+            Fix prompt string
+        """
+        return f"""Your previous response had a JSON parsing error: {error}
+
+Please provide the extracted data again, ensuring it is ONLY valid JSON with no additional text, comments, or markdown formatting.
+
+Previous response that failed:
+{previous_response[:500]}
+
+Remember:
+1. Output ONLY valid JSON
+2. No markdown code blocks
+3. No explanations or comments
+4. Follow the exact schema provided earlier
+
+Original content to extract from:
+{content[:5000]}
+"""
+    
+    def _build_validation_fix_prompt(self, previous_data: Dict, errors: List[str], content: str, metadata: Dict[str, Any]) -> str:
+        """
+        Build a fix prompt for schema validation errors.
+        
+        Args:
+            previous_data: The previous extracted data that failed validation
+            errors: List of validation error messages
+            content: Original content
+            metadata: Original metadata
+            
+        Returns:
+            Fix prompt string
+        """
+        errors_text = "\n".join(f"- {error}" for error in errors)
+        
+        return f"""Your previous response had schema validation errors:
+
+{errors_text}
+
+Please provide the extracted data again, fixing these specific issues:
+
+Previous data that failed validation:
+{json.dumps(previous_data, indent=2)[:1000]}
+
+Requirements:
+1. Fix all validation errors listed above
+2. Ensure all required fields are present
+3. Use correct data types (strings, arrays, objects)
+4. Dates must be in ISO 8601 format (YYYY-MM-DD)
+5. Confidence values must be: high, medium, or low
+6. Output ONLY valid JSON
+
+Original content to extract from:
+{content[:5000]}
+"""
