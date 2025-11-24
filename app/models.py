@@ -171,6 +171,26 @@ class CrawlResult(Base):
         comment="Value of the extracted data (short or long format)"
     )
     
+    # LLM extraction fields
+    raw_llm_output = Column(
+        Text,
+        nullable=True,
+        comment="Raw JSON output from LLM before normalization"
+    )
+    
+    normalized_data = Column(
+        Text,
+        nullable=True,
+        comment="Normalized JSON data matching schema"
+    )
+    
+    extraction_method = Column(
+        String(20),
+        nullable=True,
+        default='bedrock',
+        comment="Method used for extraction: 'bedrock', 'regex', or 'keyword'"
+    )
+    
     # Timestamp
     created_at = Column(
         DateTime,
@@ -198,5 +218,8 @@ class CrawlResult(Base):
             'content_snippet': self.content_snippet,
             'data_key': self.data_key,
             'data_value': self.data_value,
+            'raw_llm_output': self.raw_llm_output,
+            'normalized_data': self.normalized_data,
+            'extraction_method': self.extraction_method,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }

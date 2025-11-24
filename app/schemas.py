@@ -92,6 +92,9 @@ class ResultItem(BaseModel):
         page_url: URL of the page where keyword was found
         page_title: Title of the page (may be None)
         content_snippet: Content snippet or full markdown containing the keyword
+        normalized_data: Normalized JSON data from LLM extraction (optional)
+        raw_llm_output: Raw JSON output from LLM (optional, only if requested)
+        extraction_method: Method used for extraction (bedrock, regex, keyword)
     """
     page_url: str = Field(
         ...,
@@ -104,6 +107,18 @@ class ResultItem(BaseModel):
     content_snippet: str = Field(
         ...,
         description="Content snippet or full markdown containing the keyword"
+    )
+    normalized_data: Optional[str] = Field(
+        None,
+        description="Normalized JSON data from LLM extraction (if available)"
+    )
+    raw_llm_output: Optional[str] = Field(
+        None,
+        description="Raw JSON output from LLM before normalization (optional)"
+    )
+    extraction_method: Optional[str] = Field(
+        None,
+        description="Method used for extraction: bedrock, regex, or keyword"
     )
     
     model_config = ConfigDict(

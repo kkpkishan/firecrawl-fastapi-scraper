@@ -43,6 +43,40 @@ async def lifespan(app: FastAPI):
     logger.info(f"Database URL: {settings.db_url.split('@')[1] if '@' in settings.db_url else 'configured'}")
     logger.info(f"Firecrawl URL: {settings.firecrawl_api_url}")
     
+    # Log Bedrock configuration
+    logger.info("=" * 60)
+    logger.info("AWS Bedrock Configuration:")
+    logger.info(f"  Bedrock Extraction: {'ENABLED' if settings.enable_bedrock_extraction else 'DISABLED'}")
+    
+    if settings.enable_bedrock_extraction:
+        logger.info(f"  AWS Region: {settings.aws_region}")
+        logger.info(f"  Model ID: {settings.bedrock_model_id}")
+        logger.info(f"  Temperature: {settings.bedrock_temperature}")
+        logger.info(f"  Max Tokens: {settings.bedrock_max_tokens}")
+        
+        # Log credential source
+        import os
+        if settings.aws_bearer_token_bedrock:
+            logger.info(f"  Credential Source: Bearer Token")
+        elif os.getenv('AWS_ACCESS_KEY_ID'):
+            logger.info(f"  Credential Source: Environment Variables (AWS_ACCESS_KEY_ID)")
+        else:
+            logger.info(f"  Credential Source: IAM Role / Credential Chain")
+        
+        # Validate configuration
+        is_valid, errors = settings.validate_bedrock_config()
+        if not is_valid:
+            logger.error("Bedrock configuration validation failed:")
+            for error in errors:
+                logger.error(f"  - {error}")
+            logger.warning("Bedrock extraction will be disabled due to configuration errors")
+        else:
+            logger.info("  Configuration: Valid ✓")
+    else:
+        logger.info("  Using regex extraction instead")
+    
+    logger.info("=" * 60)
+    
     try:
         await init_db()
         logger.info("Database initialized successfully")
@@ -327,6 +361,7 @@ async def crawl_nested_urls(
 )
 async def get_crawl_status(
     job_id: UUID,
+    include_raw: bool = False,
     db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
@@ -338,6 +373,7 @@ async def get_crawl_status(
     
     Args:
         job_id: UUID of the crawl job
+        include_raw: Whether to include raw LLM output (default: False)
         db: Database session
         api_key: Validated API key
         
@@ -382,7 +418,10 @@ async def get_crawl_status(
                 ResultItem(
                     page_url=result.page_url,
                     page_title=result.page_title,
-                    content_snippet=result.content_snippet
+                    content_snippet=result.content_snippet,
+                    normalized_data=result.normalized_data,
+                    raw_llm_output=result.raw_llm_output if include_raw else None,
+                    extraction_method=result.extraction_method
                 )
                 for result in results
             ]
@@ -1092,15 +1131,21 @@ async def extract_and_store_results(
     total_patterns_found = 0
     
     # Get extractor instances
-    extractor = get_extractor()
+    from bedrock_extractor import get_bedrock_extractor, normalize_extracted_data
+    import json
+    
+    regex_extractor = get_extractor()
+    bedrock_extractor = get_bedrock_extractor() if settings.enable_bedrock_extraction else None
     nested_scraper = get_nested_scraper()
+    document_extractor = get_document_extractor()
     
     # Track all nested URLs found
     all_nested_web_pages = set()
     all_nested_documents = set()
     
     logger.info(f"Job {job_id}: Processing {len(crawled_data)} pages for keyword '{keyword}' (depth {current_depth}/{max_depth})")
-    logger.info(f"Regex extraction enabled: {extractor.enabled}")
+    logger.info(f"Bedrock extraction enabled: {settings.enable_bedrock_extraction}")
+    logger.info(f"Regex extraction enabled: {regex_extractor.enabled}")
     logger.info(f"Nested scraping enabled: {follow_nested}")
     
     for page in crawled_data:
@@ -1113,6 +1158,25 @@ async def extract_and_store_results(
             page_url = metadata.get("sourceURL", "")
             page_title = metadata.get("title", "")
             
+            # Check if this is a document URL
+            is_document = document_extractor.is_document_url(page_url)
+            doc_metadata = {}
+            
+            if is_document:
+                logger.info(f"Detected document URL: {page_url}")
+                
+                # Extract document text and metadata
+                doc_text, doc_error = await document_extractor.extract_text(page_url)
+                doc_metadata = await document_extractor.extract_metadata(page_url)
+                
+                if doc_text:
+                    # Use document text as content
+                    markdown_content = doc_text
+                    logger.info(f"Extracted {len(doc_text)} characters from document")
+                elif doc_error:
+                    logger.error(f"Document extraction failed: {doc_error}")
+                    continue
+            
             # Skip empty content
             if not markdown_content or len(markdown_content.strip()) < 10:
                 logger.debug(f"Skipping page with no content: {page_url}")
@@ -1124,8 +1188,121 @@ async def extract_and_store_results(
             if found:
                 logger.info(f"✓ Keyword '{keyword}' found in: {page_url}")
                 
-                # Extract structured data using regex patterns from .env
-                if extractor.enabled:
+                # For documents, first extract with regex, then pass to Bedrock for structuring
+                regex_extracted_data = None
+                if is_document and regex_extractor.enabled:
+                    logger.info(f"  → Pre-extracting patterns from document using regex")
+                    raw_extracted = extract_with_regex(markdown_content, output_format='raw')
+                    regex_extracted_data = extract_with_regex(markdown_content, output_format='keyvalue')
+                    
+                    if regex_extracted_data.get('enabled') and regex_extracted_data.get('data'):
+                        logger.info(f"  → Regex found {len(regex_extracted_data['data'])} patterns, passing to Bedrock for structuring")
+                
+                # Try Bedrock extraction first if enabled
+                if bedrock_extractor and bedrock_extractor.enabled:
+                    try:
+                        # Build metadata for LLM
+                        content_type = 'html'
+                        if is_document:
+                            doc_type = doc_metadata.get('document_type', '').replace('.', '')
+                            content_type = doc_type if doc_type else 'document'
+                        
+                        llm_metadata = {
+                            'url': page_url,
+                            'title': page_title,
+                            'content_type': content_type,
+                            'keyword': keyword,
+                            'parent_url': metadata.get('parentURL', '')
+                        }
+                        
+                        # Add document-specific metadata
+                        if is_document:
+                            if doc_metadata.get('page_count'):
+                                llm_metadata['page_count'] = doc_metadata['page_count']
+                            if doc_metadata.get('sheet_names'):
+                                llm_metadata['sheet_names'] = ', '.join(doc_metadata['sheet_names'])
+                            if doc_metadata.get('section_count'):
+                                llm_metadata['section_count'] = doc_metadata['section_count']
+                            
+                            # Add regex-extracted data to metadata for better LLM understanding
+                            if regex_extracted_data and regex_extracted_data.get('data'):
+                                llm_metadata['regex_patterns_found'] = len(regex_extracted_data['data'])
+                                # Include sample of extracted patterns
+                                sample_patterns = regex_extracted_data['data'][:10]
+                                llm_metadata['sample_patterns'] = json.dumps(sample_patterns)
+                        
+                        # For documents with regex data, create enhanced content for LLM
+                        llm_content = markdown_content
+                        if is_document and regex_extracted_data and regex_extracted_data.get('data'):
+                            # Prepend regex-extracted data summary to help LLM
+                            regex_summary = "\n\n=== EXTRACTED PATTERNS ===\n"
+                            for item in regex_extracted_data['data'][:20]:  # Include first 20 patterns
+                                regex_summary += f"{item['key']}: {item['value']}\n"
+                            regex_summary += "\n=== ORIGINAL CONTENT ===\n"
+                            llm_content = regex_summary + markdown_content[:8000]  # Limit content
+                        
+                        # Extract using Bedrock
+                        extracted_data, error = await bedrock_extractor.extract_structured_data(
+                            llm_content,
+                            llm_metadata
+                        )
+                        
+                        if extracted_data and not error:
+                            # Normalize the extracted data
+                            normalized = normalize_extracted_data(extracted_data)
+                            
+                            # Store raw and normalized data
+                            raw_json = json.dumps(extracted_data)
+                            normalized_json = json.dumps(normalized)
+                            
+                            # Extract key fields for backward compatibility
+                            page_info = normalized.get('page_info', {})
+                            extracted_fields = normalized.get('extracted_fields', [])
+                            dates = normalized.get('dates', [])
+                            
+                            # Build content snippet from extracted data
+                            content_parts = []
+                            content_parts.append(f"SUMMARY: {page_info.get('summary', '')}")
+                            
+                            if extracted_fields:
+                                content_parts.append("\nEXTRACTED FIELDS:")
+                                for field in extracted_fields[:5]:  # Limit to first 5
+                                    content_parts.append(f"  - {field.get('key')}: {field.get('value')}")
+                            
+                            if dates:
+                                content_parts.append("\nDATES:")
+                                for date in dates[:5]:  # Limit to first 5
+                                    content_parts.append(f"  - {date.get('label')}: {date.get('value')}")
+                            
+                            content_snippet = '\n'.join(content_parts)
+                            
+                            # Use first extracted field for backward compatibility
+                            data_key = extracted_fields[0].get('key', 'Bedrock Extraction') if extracted_fields else 'Bedrock Extraction'
+                            data_value = extracted_fields[0].get('value', page_info.get('summary', '')) if extracted_fields else page_info.get('summary', '')
+                            
+                            # Store result with LLM data
+                            await create_result(
+                                db,
+                                job_id=job_id,
+                                page_url=page_url,
+                                page_title=page_title or "No Title",
+                                content_snippet=content_snippet,
+                                data_key=data_key,
+                                data_value=data_value,
+                                raw_llm_output=raw_json,
+                                normalized_data=normalized_json,
+                                extraction_method='bedrock'
+                            )
+                            matches_found += 1
+                            logger.info(f"  → Extracted data using Bedrock LLM")
+                            continue  # Skip regex extraction
+                        else:
+                            logger.warning(f"  → Bedrock extraction failed: {error}, falling back to regex")
+                    except Exception as e:
+                        logger.error(f"  → Bedrock extraction error: {e}, falling back to regex")
+                
+                # Fall back to regex extraction if Bedrock is disabled or failed
+                if regex_extractor.enabled:
                     # Get raw matches for nested URL extraction
                     raw_extracted = extract_with_regex(markdown_content, output_format='raw')
                     extracted_data = extract_with_regex(markdown_content, output_format='keyvalue')
@@ -1165,7 +1342,8 @@ async def extract_and_store_results(
                                 page_title=page_title or "No Title",
                                 content_snippet=content_snippet,
                                 data_key=data_key,
-                                data_value=data_value
+                                data_value=data_value,
+                                extraction_method='regex'
                             )
                             matches_found += 1
                         
@@ -1185,12 +1363,13 @@ async def extract_and_store_results(
                             page_title=page_title or "No Title",
                             content_snippet=content_snippet,
                             data_key=data_key,
-                            data_value=data_value
+                            data_value=data_value,
+                            extraction_method='keyword'
                         )
                         matches_found += 1
                 else:
-                    # Regex extraction disabled, store keyword context only
-                    logger.info(f"  → Regex extraction disabled, storing keyword context")
+                    # Both Bedrock and regex extraction disabled, store keyword context only
+                    logger.info(f"  → All extraction methods disabled, storing keyword context")
                     data_key = f"Keyword Match: {keyword}"
                     data_value = extract_context_around_keyword(markdown_content, keyword, context_chars=300)
                     
@@ -1203,7 +1382,8 @@ async def extract_and_store_results(
                         page_title=page_title or "No Title",
                         content_snippet=content_snippet,
                         data_key=data_key,
-                        data_value=data_value
+                        data_value=data_value,
+                        extraction_method='keyword'
                     )
                     matches_found += 1
             else:

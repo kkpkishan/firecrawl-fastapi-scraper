@@ -7,7 +7,8 @@ understanding and extraction of structured data from web content.
 import json
 import logging
 import re
-from typing import Dict, Optional, Tuple, Any, List
+from typing import Dict, Optional, Tuple, Any, List, Union
+from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError, BotoCoreError
 from config import settings
@@ -137,11 +138,20 @@ class BedrockExtractor:
         # Build the initial prompt
         prompt = self._build_prompt(content, metadata)
         
-        # Try extraction with retries
+        # Try extraction with retries and exponential backoff for throttling
+        import asyncio
+        import random
+        
+        throttle_retry_count = 0
+        max_throttle_retries = 3
+        
         for attempt in range(self.max_retries + 1):
             try:
                 # Invoke LLM
                 response_text = await self._invoke_bedrock(prompt)
+                
+                # Reset throttle counter on successful invocation
+                throttle_retry_count = 0
                 
                 # Parse response
                 extracted_data, parse_error = self._parse_llm_response(response_text)
@@ -174,11 +184,40 @@ class BedrockExtractor:
                 return extracted_data, None
                 
             except Exception as e:
+                error_str = str(e)
+                
+                # Check if this is a throttling error
+                is_throttling = 'throttl' in error_str.lower() or 'rate limit' in error_str.lower()
+                
+                if is_throttling and throttle_retry_count < max_throttle_retries:
+                    throttle_retry_count += 1
+                    
+                    # Exponential backoff: 1s, 2s, 4s
+                    base_delay = 2 ** (throttle_retry_count - 1)  # 1, 2, 4
+                    
+                    # Add jitter (random 0-50% of base delay) to prevent thundering herd
+                    jitter = random.uniform(0, base_delay * 0.5)
+                    delay = base_delay + jitter
+                    
+                    logger.warning(f"Throttling detected (attempt {throttle_retry_count}/{max_throttle_retries}). Retrying in {delay:.2f}s with exponential backoff")
+                    
+                    await asyncio.sleep(delay)
+                    
+                    # Don't increment the main attempt counter for throttling retries
+                    continue
+                
+                elif is_throttling:
+                    # Exhausted throttle retries
+                    error_msg = f"Bedrock throttling error: Request throttled after {max_throttle_retries} retry attempts with exponential backoff"
+                    logger.error(error_msg)
+                    return None, error_msg
+                
+                # Non-throttling error
                 if attempt < self.max_retries:
                     logger.warning(f"Extraction error on attempt {attempt + 1}: {e}")
                     continue
                 else:
-                    error_msg = f"Bedrock extraction failed after {self.max_retries + 1} attempts: {str(e)}"
+                    error_msg = f"Bedrock extraction failed after {self.max_retries + 1} attempts: {error_str}"
                     logger.error(error_msg)
                     return None, error_msg
         
@@ -338,8 +377,21 @@ Use this metadata to provide context-aware extraction.
                         "stopSequences": []
                     }
                 }
+            elif 'claude-3' in self.model_id.lower():
+                # Anthropic Claude 3 models (new format)
+                request_body = {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": self.max_tokens,
+                    "temperature": self.temperature,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+                }
             elif 'claude' in self.model_id.lower():
-                # Anthropic Claude models
+                # Anthropic Claude 2 models (old format)
                 request_body = {
                     "prompt": f"\n\nHuman: {prompt}\n\nAssistant:",
                     "temperature": self.temperature,
@@ -372,14 +424,37 @@ Use this metadata to provide context-aware extraction.
                 }
                 
                 async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        endpoint,
-                        headers=headers,
-                        json=request_body,
-                        timeout=30.0
-                    )
-                    response.raise_for_status()
-                    response_body = response.json()
+                    try:
+                        response = await client.post(
+                            endpoint,
+                            headers=headers,
+                            json=request_body,
+                            timeout=60.0
+                        )
+                        response.raise_for_status()
+                        response_body = response.json()
+                        
+                        # Debug: Log the response structure
+                        logger.debug(f"Bedrock response keys: {list(response_body.keys())}")
+                        logger.debug(f"Bedrock response body (first 500 chars): {str(response_body)[:500]}")
+                        
+                    except httpx.TimeoutException:
+                        logger.error("Bedrock request timeout via bearer token")
+                        raise Exception("Bedrock request timed out. The model may be overloaded.")
+                    except httpx.HTTPStatusError as e:
+                        status_code = e.response.status_code
+                        if status_code == 503:
+                            logger.error("Bedrock service unavailable (503)")
+                            raise Exception("Bedrock service is currently unavailable. Please try again later.")
+                        elif status_code == 403:
+                            logger.error("Bedrock permission denied (403)")
+                            raise Exception("Access denied to Bedrock. Check bearer token permissions.")
+                        elif status_code == 429:
+                            logger.warning("Bedrock throttling (429)")
+                            raise Exception("Bedrock API rate limit exceeded. Request throttled.")
+                        else:
+                            logger.error(f"Bedrock HTTP error: {status_code}")
+                            raise Exception(f"Bedrock API error: HTTP {status_code}")
             else:
                 # Use standard boto3 client with credential chain
                 response = self.client.invoke_model(
@@ -395,7 +470,15 @@ Use this metadata to provide context-aware extraction.
             # Extract text based on model type
             if 'titan' in self.model_id.lower():
                 response_text = response_body.get('results', [{}])[0].get('outputText', '')
+            elif 'claude-3' in self.model_id.lower():
+                # Claude 3 format: content is in messages array
+                content = response_body.get('content', [])
+                if content and len(content) > 0:
+                    response_text = content[0].get('text', '')
+                else:
+                    response_text = ''
             elif 'claude' in self.model_id.lower():
+                # Claude 2 format
                 response_text = response_body.get('completion', '')
             else:
                 response_text = response_body.get('outputText', '') or response_body.get('completion', '')
@@ -405,16 +488,60 @@ Use this metadata to provide context-aware extraction.
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
             error_message = e.response.get('Error', {}).get('Message', str(e))
-            logger.error(f"Bedrock ClientError [{error_code}]: {error_message}")
-            raise Exception(f"Bedrock API error: {error_code} - {error_message}")
+            
+            # Handle specific AWS Bedrock errors
+            if error_code == 'ServiceUnavailable' or error_code == '503':
+                # Service unavailable (503)
+                logger.error(f"Bedrock service unavailable: {error_message}")
+                raise Exception(f"Bedrock service is currently unavailable. Please try again later.")
+            
+            elif error_code == 'AccessDeniedException' or error_code == '403':
+                # Permission denied (403)
+                logger.error(f"Bedrock permission denied: {error_message}")
+                raise Exception(f"Access denied to Bedrock. Check IAM permissions for bedrock:InvokeModel")
+            
+            elif error_code == 'ThrottlingException' or error_code == '429':
+                # Throttling (429) - will be handled by retry logic
+                logger.warning(f"Bedrock throttling: {error_message}")
+                raise Exception(f"Bedrock API rate limit exceeded. Request throttled.")
+            
+            elif error_code == 'ValidationException' or error_code == '400':
+                # Invalid request (400)
+                logger.error(f"Bedrock validation error: {error_message}")
+                # Don't log sensitive content in production
+                if settings.log_level != 'DEBUG':
+                    raise Exception(f"Invalid request to Bedrock API")
+                else:
+                    raise Exception(f"Bedrock validation error: {error_message}")
+            
+            elif 'timeout' in error_message.lower() or 'timed out' in error_message.lower():
+                # Timeout errors
+                logger.error(f"Bedrock request timeout: {error_message}")
+                raise Exception(f"Bedrock request timed out. The model may be overloaded.")
+            
+            else:
+                # Generic error
+                logger.error(f"Bedrock ClientError [{error_code}]: {error_message}")
+                # Don't expose sensitive details in production
+                if settings.log_level != 'DEBUG':
+                    raise Exception(f"Bedrock API error: {error_code}")
+                else:
+                    raise Exception(f"Bedrock API error: {error_code} - {error_message}")
         
         except BotoCoreError as e:
             logger.error(f"Bedrock BotoCoreError: {e}")
             raise Exception(f"AWS SDK error: {str(e)}")
         
         except Exception as e:
-            logger.error(f"Unexpected error invoking Bedrock: {e}")
-            raise
+            # Catch-all for unexpected errors
+            error_str = str(e)
+            logger.error(f"Unexpected error invoking Bedrock: {error_str}")
+            
+            # Don't log sensitive content in production
+            if settings.log_level != 'DEBUG' and len(error_str) > 100:
+                raise Exception(f"Unexpected error during Bedrock invocation")
+            else:
+                raise
     
     def _parse_llm_response(self, response_text: str) -> Tuple[Optional[Dict], Optional[str]]:
         """
@@ -455,6 +582,72 @@ Use this metadata to provide context-aware extraction.
                 pass
         
         return None, f"Could not parse JSON from response: {response_text[:200]}"
+    
+    def _build_fix_prompt(self, previous_response: str, error: str, content: str, metadata: Dict[str, Any]) -> str:
+        """
+        Build a fix prompt for JSON parsing errors.
+        
+        Args:
+            previous_response: The previous LLM response that failed
+            error: The parsing error message
+            content: Original content
+            metadata: Original metadata
+            
+        Returns:
+            Fix prompt string
+        """
+        return f"""Your previous response had a JSON parsing error: {error}
+
+Please provide the extracted data again, ensuring it is ONLY valid JSON with no additional text, comments, or markdown formatting.
+
+Previous response that failed:
+{previous_response[:500]}
+
+Remember:
+1. Output ONLY valid JSON
+2. No markdown code blocks
+3. No explanations or comments
+4. Follow the exact schema provided earlier
+
+Original content to extract from:
+{content[:5000]}
+"""
+    
+    def _build_validation_fix_prompt(self, previous_data: Dict, errors: List[str], content: str, metadata: Dict[str, Any]) -> str:
+        """
+        Build a fix prompt for schema validation errors.
+        
+        Args:
+            previous_data: The previous extracted data that failed validation
+            errors: List of validation error messages
+            content: Original content
+            metadata: Original metadata
+            
+        Returns:
+            Fix prompt string
+        """
+        errors_text = "\n".join(f"- {error}" for error in errors)
+        
+        return f"""Your previous response had schema validation errors:
+
+{errors_text}
+
+Please provide the extracted data again, fixing these specific issues:
+
+Previous data that failed validation:
+{json.dumps(previous_data, indent=2)[:1000]}
+
+Requirements:
+1. Fix all validation errors listed above
+2. Ensure all required fields are present
+3. Use correct data types (strings, arrays, objects)
+4. Dates must be in ISO 8601 format (YYYY-MM-DD)
+5. Confidence values must be: high, medium, or low
+6. Output ONLY valid JSON
+
+Original content to extract from:
+{content[:5000]}
+"""
 
 
 # Global extractor instance
@@ -656,3 +849,269 @@ Requirements:
 Original content to extract from:
 {content[:5000]}
 """
+
+
+def normalize_extracted_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize extracted data by cleaning and standardizing values.
+    
+    Normalization steps:
+    1. Trim whitespace from all string fields (recursive)
+    2. Remove HTML tags from text fields
+    3. Normalize dates to ISO 8601 format
+    4. Convert numeric strings to appropriate numeric types
+    5. Set default values for missing optional fields
+    
+    Args:
+        data: Extracted data dictionary from LLM
+        
+    Returns:
+        Normalized data dictionary
+    """
+    if not isinstance(data, dict):
+        return data
+    
+    # Create a copy to avoid modifying original
+    normalized = {}
+    
+    for key, value in data.items():
+        if key == 'page_info':
+            normalized[key] = _normalize_page_info(value)
+        elif key == 'extracted_fields':
+            normalized[key] = _normalize_extracted_fields(value)
+        elif key == 'dates':
+            normalized[key] = _normalize_dates(value)
+        elif key == 'metadata':
+            normalized[key] = _normalize_metadata(value)
+        else:
+            # Recursively normalize other fields
+            normalized[key] = _normalize_value(value)
+    
+    # Set default values for missing optional fields
+    if 'extracted_fields' not in normalized:
+        normalized['extracted_fields'] = []
+    if 'dates' not in normalized:
+        normalized['dates'] = []
+    
+    return normalized
+
+
+def _normalize_page_info(page_info: Any) -> Dict[str, Any]:
+    """Normalize page_info section."""
+    if not isinstance(page_info, dict):
+        return page_info
+    
+    normalized = {}
+    for key, value in page_info.items():
+        if isinstance(value, str):
+            # Trim whitespace and remove HTML tags
+            value = value.strip()
+            value = remove_html_tags(value)
+        normalized[key] = value
+    
+    return normalized
+
+
+def _normalize_extracted_fields(fields: Any) -> List[Dict[str, Any]]:
+    """Normalize extracted_fields array."""
+    if not isinstance(fields, list):
+        return []
+    
+    normalized = []
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        
+        normalized_field = {}
+        for key, value in field.items():
+            if isinstance(value, str):
+                # Trim whitespace and remove HTML tags
+                value = value.strip()
+                if key in ['value', 'context']:
+                    value = remove_html_tags(value)
+                
+                # Try to convert numeric strings in 'value' field
+                if key == 'value':
+                    converted = convert_numeric_string(value)
+                    # Keep as string if it's still a string after conversion
+                    if isinstance(converted, str):
+                        normalized_field[key] = converted
+                    else:
+                        # Store numeric value but keep original string representation
+                        normalized_field[key] = value
+                        normalized_field['numeric_value'] = converted
+                else:
+                    normalized_field[key] = value
+            else:
+                normalized_field[key] = value
+        
+        normalized.append(normalized_field)
+    
+    return normalized
+
+
+def _normalize_dates(dates: Any) -> List[Dict[str, Any]]:
+    """Normalize dates array."""
+    if not isinstance(dates, list):
+        return []
+    
+    normalized = []
+    for date_obj in dates:
+        if not isinstance(date_obj, dict):
+            continue
+        
+        normalized_date = {}
+        for key, value in date_obj.items():
+            if isinstance(value, str):
+                value = value.strip()
+                
+                # Normalize date value to ISO 8601
+                if key == 'value':
+                    value = normalize_date(value)
+                elif key in ['label', 'context']:
+                    value = remove_html_tags(value)
+                
+                normalized_date[key] = value
+            else:
+                normalized_date[key] = value
+        
+        normalized.append(normalized_date)
+    
+    return normalized
+
+
+def _normalize_metadata(metadata: Any) -> Dict[str, Any]:
+    """Normalize metadata section."""
+    if not isinstance(metadata, dict):
+        return metadata
+    
+    normalized = {}
+    for key, value in metadata.items():
+        if isinstance(value, str):
+            value = value.strip()
+        normalized[key] = value
+    
+    return normalized
+
+
+def _normalize_value(value: Any) -> Any:
+    """
+    Recursively normalize any value.
+    
+    Args:
+        value: Value to normalize
+        
+    Returns:
+        Normalized value
+    """
+    if isinstance(value, str):
+        # Trim whitespace
+        value = value.strip()
+        # Remove HTML tags
+        value = remove_html_tags(value)
+        return value
+    elif isinstance(value, dict):
+        return {k: _normalize_value(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [_normalize_value(item) for item in value]
+    else:
+        return value
+
+
+def remove_html_tags(text: str) -> str:
+    """
+    Remove HTML tags from text.
+    
+    Args:
+        text: Text potentially containing HTML tags
+        
+    Returns:
+        Text with HTML tags removed
+    """
+    if not isinstance(text, str):
+        return text
+    
+    # Remove HTML tags using regex
+    clean_text = re.sub(r'<[^>]+>', '', text)
+    
+    # Remove extra whitespace that may result from tag removal
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    
+    return clean_text
+
+
+def normalize_date(date_str: str) -> str:
+    """
+    Convert various date formats to ISO 8601 format (YYYY-MM-DD).
+    
+    Args:
+        date_str: Date string in various formats
+        
+    Returns:
+        Date string in ISO 8601 format, or original string if parsing fails
+    """
+    if not isinstance(date_str, str):
+        return date_str
+    
+    date_str = date_str.strip()
+    
+    # If already in ISO 8601 format, return as-is
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+        return date_str
+    
+    # Try common date formats
+    formats = [
+        '%Y-%m-%d',           # 2024-01-15
+        '%d/%m/%Y',           # 15/01/2024
+        '%m/%d/%Y',           # 01/15/2024
+        '%d-%m-%Y',           # 15-01-2024
+        '%Y/%m/%d',           # 2024/01/15
+        '%B %d, %Y',          # January 15, 2024
+        '%b %d, %Y',          # Jan 15, 2024
+        '%d %B %Y',           # 15 January 2024
+        '%d %b %Y',           # 15 Jan 2024
+        '%Y-%m-%dT%H:%M:%S',  # ISO 8601 with time
+        '%Y-%m-%dT%H:%M:%SZ', # ISO 8601 with time and Z
+    ]
+    
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.strftime('%Y-%m-%d')
+        except ValueError:
+            continue
+    
+    # If no format matches, return original string
+    logger.warning(f"Could not parse date: {date_str}")
+    return date_str
+
+
+def convert_numeric_string(value: str) -> Union[int, float, str]:
+    """
+    Convert numeric strings to appropriate numeric types.
+    
+    Args:
+        value: String value that might be numeric
+        
+    Returns:
+        int, float, or original string
+    """
+    if not isinstance(value, str):
+        return value
+    
+    # Remove whitespace and common formatting
+    value = value.strip()
+    
+    # Remove common currency symbols and commas
+    cleaned = value.replace(',', '').replace('$', '').replace('€', '').replace('£', '')
+    
+    # Try to convert to number
+    try:
+        # Check if it contains a decimal point
+        if '.' in cleaned:
+            return float(cleaned)
+        else:
+            return int(cleaned)
+    except ValueError:
+        # Not a number, return original string
+        return value

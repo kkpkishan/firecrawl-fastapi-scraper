@@ -332,7 +332,10 @@ async def create_result(
     page_title: str,
     content_snippet: str,
     data_key: str = None,
-    data_value: str = None
+    data_value: str = None,
+    raw_llm_output: str = None,
+    normalized_data: str = None,
+    extraction_method: str = None
 ):
     """
     Create a new crawl result.
@@ -345,6 +348,9 @@ async def create_result(
         content_snippet: Content containing the keyword
         data_key: Key/title of extracted data (optional)
         data_value: Value of extracted data (optional)
+        raw_llm_output: Raw JSON output from LLM before normalization (optional)
+        normalized_data: Normalized JSON data matching schema (optional)
+        extraction_method: Method used for extraction: 'bedrock', 'regex', or 'keyword' (optional)
         
     Returns:
         Created CrawlResult object
@@ -357,7 +363,10 @@ async def create_result(
         page_title=page_title,
         content_snippet=content_snippet,
         data_key=data_key,
-        data_value=data_value
+        data_value=data_value,
+        raw_llm_output=raw_llm_output,
+        normalized_data=normalized_data,
+        extraction_method=extraction_method
     )
     
     db.add(result)

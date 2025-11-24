@@ -4,9 +4,13 @@ A scalable, production-ready web scraping service built with FastAPI and Firecra
 
 ## 🚀 Features
 
+- **AWS Bedrock LLM Extraction**: Intelligent data extraction using Claude 3 Haiku for structured JSON output
+- **Dual Extraction Methods**: Automatic fallback between LLM and regex-based extraction
+- **PDF Document Processing**: Extract text and structured data from PDF files
 - **Asynchronous Job Processing**: Submit crawl jobs and retrieve results later
 - **Keyword Extraction**: Case-insensitive keyword search across all crawled pages
 - **Firecrawl Integration**: Leverages open-source Firecrawl for robust web crawling
+- **Dynamic Regex Patterns**: Fully configurable regex patterns via .env file
 - **API Key Authentication**: Secure endpoints with API key validation
 - **Comprehensive Error Handling**: Retry logic, timeouts, and graceful degradation
 - **Docker Compose Setup**: Easy deployment with all services containerized
@@ -44,7 +48,16 @@ APP_API_KEY=your-secure-random-api-key-here
 
 # Optional: Change database password for production
 POSTGRES_PASSWORD=your-secure-password
+
+# AWS Bedrock Configuration (Optional - for LLM extraction)
+ENABLE_BEDROCK_EXTRACTION=true
+AWS_REGION=ap-south-1
+AWS_ACCESS_KEY_ID=your-aws-access-key
+AWS_SECRET_ACCESS_KEY=your-aws-secret-key
+BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
 ```
+
+**Note**: AWS Bedrock is optional. If not configured, the system will use regex-based extraction.
 
 ### 3. Start the Services
 
@@ -147,7 +160,10 @@ curl -X GET http://localhost:8000/crawl/123e4567-e89b-12d3-a456-426614174000 \
     {
       "page_url": "https://example.com/page1",
       "page_title": "Page Title",
-      "content_snippet": "Content containing the keyword..."
+      "content_snippet": "Content containing the keyword...",
+      "extraction_method": "bedrock",
+      "normalized_data": "{...}",
+      "raw_llm_output": "{...}"
     }
   ],
   "error": null,
@@ -155,6 +171,94 @@ curl -X GET http://localhost:8000/crawl/123e4567-e89b-12d3-a456-426614174000 \
   "completed_at": "2025-11-14T12:01:00"
 }
 ```
+
+### Get Results with Raw LLM Output
+
+**Endpoint**: `GET /crawl/{job_id}?include_raw=true`
+
+```bash
+curl -X GET "http://localhost:8000/crawl/123e4567-e89b-12d3-a456-426614174000?include_raw=true" \
+  -H "X-API-Key: your-api-key-here"
+```
+
+This includes the complete LLM JSON output with structured data extraction.
+
+## 🤖 AWS Bedrock LLM Extraction
+
+### Overview
+
+The system supports intelligent data extraction using AWS Bedrock's Claude 3 Haiku model. When enabled, the LLM automatically structures extracted data into JSON format with:
+
+- **Page Information**: Title, URL, summary
+- **Extracted Fields**: Key-value pairs with confidence levels
+- **Dates**: Automatically formatted to ISO 8601 (YYYY-MM-DD)
+- **Metadata**: Extraction timestamp, model used, content type
+
+### Extraction Methods
+
+The system uses a smart fallback approach:
+
+1. **AWS Bedrock LLM** (Primary): For unstructured content and semantic understanding
+2. **Regex Patterns** (Fallback): For structured documents and pattern-based extraction
+3. **Keyword Context** (Last Resort): When no patterns match
+
+### Example LLM Output
+
+```json
+{
+  "page_info": {
+    "title": "UPSC Exam Calendar 2026",
+    "url": "https://upsc.gov.in/calendar",
+    "summary": "Schedule of examinations for 2026"
+  },
+  "extracted_fields": [
+    {
+      "key": "Examination",
+      "value": "Civil Services Examination",
+      "confidence": "high",
+      "context": "Civil Services (Preliminary) Examination, 2026"
+    }
+  ],
+  "dates": [
+    {
+      "label": "Exam Date",
+      "value": "2026-05-24",
+      "context": "Civil Services (Preliminary) Examination, 2026  24.05.2026"
+    }
+  ],
+  "metadata": {
+    "extraction_timestamp": "2025-11-24T12:00:00Z",
+    "model_used": "anthropic.claude-3-haiku-20240307-v1:0",
+    "content_type": "pdf"
+  }
+}
+```
+
+### Supported Document Types
+
+- **HTML Pages**: Web pages with structured or unstructured content
+- **PDF Documents**: Automatically extracts text and applies LLM
+- **Excel Files**: `.xlsx`, `.xls` (text extraction)
+- **Word Documents**: `.docx`, `.doc` (text extraction)
+- **Other Formats**: `.odt`, `.rtf`
+
+### Configuration
+
+Enable Bedrock extraction in `.env`:
+
+```bash
+ENABLE_BEDROCK_EXTRACTION=true
+AWS_REGION=ap-south-1
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
+BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
+```
+
+### Cost Optimization
+
+- **Temperature**: Set to 0.0 for deterministic results (lower cost)
+- **Max Tokens**: Limit to 4096 for most use cases
+- **Fallback**: Regex extraction is free and used when appropriate
 
 ## 📚 API Documentation
 
@@ -190,6 +294,8 @@ Visit http://localhost:8000/docs for interactive Swagger UI documentation.
 
 ### Environment Variables
 
+#### Core Configuration
+
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `APP_API_KEY` | API key for authentication | - | Yes |
@@ -199,6 +305,34 @@ Visit http://localhost:8000/docs for interactive Swagger UI documentation.
 | `POSTGRES_DB` | PostgreSQL database name | postgres | No |
 | `NUM_WORKERS_PER_QUEUE` | Firecrawl worker processes | 8 | No |
 | `USE_DB_AUTHENTICATION` | Firecrawl internal auth | false | No |
+
+#### AWS Bedrock LLM Configuration (Optional)
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `ENABLE_BEDROCK_EXTRACTION` | Enable AWS Bedrock LLM extraction | false | No |
+| `AWS_REGION` | AWS region for Bedrock service | us-east-1 | No |
+| `AWS_ACCESS_KEY_ID` | AWS access key (dev only) | - | No |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key (dev only) | - | No |
+| `BEDROCK_MODEL_ID` | Bedrock model to use | anthropic.claude-3-haiku-20240307-v1:0 | No |
+| `BEDROCK_TEMPERATURE` | LLM temperature (0.0-1.0) | 0.0 | No |
+| `BEDROCK_MAX_TOKENS` | Maximum tokens for LLM output | 4096 | No |
+
+**Note**: For production, use IAM roles instead of access keys.
+
+#### Regex Extraction Configuration
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `ENABLE_REGEX_EXTRACTION` | Enable regex pattern extraction | true | No |
+| `REGEX_CONTEXT_CHARS` | Context characters around matches | 200 | No |
+| `REGEX_PATTERN_*` | Dynamic regex patterns | - | No |
+
+Add custom regex patterns by prefixing with `REGEX_PATTERN_`:
+```bash
+REGEX_PATTERN_DATE=\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})\b
+REGEX_PATTERN_EMAIL=\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b
+```
 
 ### Performance Tuning
 
@@ -464,6 +598,10 @@ For issues and questions:
 
 ## 🎯 Roadmap
 
+- [x] AWS Bedrock LLM integration
+- [x] PDF document extraction
+- [x] Dynamic regex patterns
+- [x] Structured JSON output
 - [ ] Add pagination for large result sets
 - [ ] Implement job cancellation
 - [ ] Add webhook notifications
@@ -472,6 +610,8 @@ For issues and questions:
 - [ ] Export results to CSV/JSON
 - [ ] Admin dashboard
 - [ ] Rate limiting per API key
+- [ ] Nested URL scraping
+- [ ] Batch job processing
 
 ---
 

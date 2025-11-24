@@ -135,6 +135,106 @@ class DocumentExtractor:
             logger.error(error_msg, exc_info=True)
             return None, error_msg
     
+    async def extract_metadata(self, url: str) -> Dict[str, any]:
+        """
+        Extract metadata from document URL.
+        
+        Args:
+            url: Document URL
+            
+        Returns:
+            Dictionary with document metadata
+        """
+        metadata = {
+            'document_type': None,
+            'page_count': None,
+            'sheet_names': None,
+            'section_count': None,
+            'error': None
+        }
+        
+        # Check if supported document
+        doc_type = self.get_document_type(url)
+        if not doc_type:
+            metadata['error'] = f"Unsupported document type: {url}"
+            return metadata
+        
+        metadata['document_type'] = doc_type
+        
+        # Download document
+        doc_bytes, error = await self.download_document(url)
+        if not doc_bytes:
+            metadata['error'] = error
+            return metadata
+        
+        # Extract metadata based on document type
+        try:
+            if doc_type == '.pdf':
+                metadata.update(await self._extract_pdf_metadata(doc_bytes))
+            elif doc_type in ['.xlsx', '.xls']:
+                metadata.update(await self._extract_excel_metadata(doc_bytes))
+            elif doc_type in ['.docx', '.doc']:
+                metadata.update(await self._extract_word_metadata(doc_bytes))
+        except Exception as e:
+            metadata['error'] = f"Error extracting metadata: {str(e)}"
+            logger.error(f"Metadata extraction error for {doc_type}: {e}", exc_info=True)
+        
+        return metadata
+    
+    async def _extract_pdf_metadata(self, pdf_bytes: bytes) -> Dict[str, any]:
+        """Extract metadata from PDF."""
+        try:
+            import PyPDF2
+            import io
+            
+            pdf_file = io.BytesIO(pdf_bytes)
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            
+            return {
+                'page_count': len(pdf_reader.pages)
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting PDF metadata: {e}")
+            return {}
+    
+    async def _extract_excel_metadata(self, excel_bytes: bytes) -> Dict[str, any]:
+        """Extract metadata from Excel."""
+        try:
+            import openpyxl
+            import io
+            
+            excel_file = io.BytesIO(excel_bytes)
+            workbook = openpyxl.load_workbook(excel_file, data_only=True)
+            
+            return {
+                'sheet_names': workbook.sheetnames
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting Excel metadata: {e}")
+            return {}
+    
+    async def _extract_word_metadata(self, word_bytes: bytes) -> Dict[str, any]:
+        """Extract metadata from Word document."""
+        try:
+            import docx
+            import io
+            
+            word_file = io.BytesIO(word_bytes)
+            doc = docx.Document(word_file)
+            
+            # Count sections (paragraphs with heading styles)
+            section_count = 0
+            for para in doc.paragraphs:
+                if para.style.name.startswith('Heading'):
+                    section_count += 1
+            
+            return {
+                'section_count': section_count if section_count > 0 else len(doc.paragraphs)
+            }
+        except Exception as e:
+            logger.warning(f"Error extracting Word metadata: {e}")
+            return {}
+    
     async def _extract_pdf(self, pdf_bytes: bytes) -> Tuple[Optional[str], Optional[str]]:
         """Extract text from PDF."""
         try:
