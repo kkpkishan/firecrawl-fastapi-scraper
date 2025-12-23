@@ -1,8 +1,11 @@
-# AWS Bedrock Access Issue - RESOLVED
+# AWS Bedrock Extraction Status
 
-## Issue Summary
+## Summary
 
-AWS Bedrock extraction is **NOT working** because the AWS account needs to request access to the Anthropic Claude model.
+AWS Bedrock extraction is **NOT working** for two reasons:
+
+1. **Anthropic Claude 3 Haiku**: Requires model access approval (not granted yet)
+2. **Amazon Titan**: Model is accessible but **cannot follow structured extraction instructions**
 
 ## Error Message
 
@@ -21,13 +24,33 @@ If you have already filled out the form, try again in 15 minutes.
 
 ## Test Results
 
+### Test 1: Anthropic Claude 3 Haiku
+
 **PDF Tested:** https://upsc.gov.in/sites/default/files/Calendar-2026-Engl-150525_5.pdf
 
+**Error:**
+```
+ResourceNotFoundException: Model use case details have not been submitted for this account.
+```
+
 **Results:**
-- Total extractions: 51
-- Bedrock extractions: **0** (failed due to access issue)
+- Bedrock extractions: **0** (access denied)
 - Regex extractions: 51 (fallback worked)
-- Data stored: ✅ Yes (using regex)
+
+### Test 2: Amazon Titan Text Express
+
+**PDF Tested:** https://upsc.gov.in/sites/default/files/Calendar-2026-Engl-150525_5.pdf
+
+**Error:**
+```
+The model cannot find sufficient information to answer the question.
+```
+
+**Results:**
+- Bedrock extractions: **0** (model refused to extract)
+- Regex extractions: 51 (fallback worked)
+
+**Conclusion:** Amazon Titan is not suitable for structured data extraction tasks. It cannot follow the JSON schema instructions properly.
 
 ## How to Fix
 
@@ -57,6 +80,20 @@ You should see:
 - Bedrock extractions: > 0
 - Structured data with exam dates and titles
 - `normalized_data` field populated in database
+
+## Recommendation
+
+**You MUST use Anthropic Claude models for structured data extraction.**
+
+Amazon Titan models are NOT suitable because:
+- They cannot follow complex JSON schema instructions
+- They refuse to extract data when the task is complex
+- They return generic error messages instead of structured data
+
+**Required Action:**
+1. Request access to **Anthropic Claude 3 Haiku** in AWS Bedrock console
+2. Wait for approval (usually instant)
+3. Keep the model configured as: `BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0`
 
 ## Alternative: Use Different Model
 
