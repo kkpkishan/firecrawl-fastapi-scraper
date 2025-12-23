@@ -14,10 +14,10 @@ import re
 from datetime import datetime
 from typing import List, Dict, Optional
 
-from database import init_db, close_db, check_db_connection, get_db, create_job, update_job_status, get_job_by_id, create_result
+from database import init_db, close_db, check_db_connection, get_db, create_job, update_job_status, get_job_by_id, create_result, get_jobs_paginated, delete_job_by_id
 from config import settings
 from auth import verify_api_key
-from schemas import CrawlRequest, CrawlResponse, CrawlStatusResponse, ResultItem, ErrorResponse
+from schemas import CrawlRequest, CrawlResponse, CrawlStatusResponse, ResultItem, ErrorResponse, CrawlJobListResponse, CrawlJobListItem, PaginationMetadata, DeleteJobResponse
 from regex_extractor import get_extractor, extract_with_regex
 from nested_scraper import get_nested_scraper
 from document_extractor import get_document_extractor
@@ -349,6 +349,108 @@ async def crawl_nested_urls(
 
 
 @app.get(
+    "/crawl/jobs",
+    response_model=CrawlJobListResponse,
+    responses={
+        200: {"description": "List of crawl jobs retrieved successfully"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    },
+    tags=["Crawl"]
+)
+async def list_crawl_jobs(
+    page: int = 1,
+    page_size: int = 20,
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    List all crawl jobs with pagination.
+    
+    Retrieves a paginated list of all crawl jobs ordered by creation time (newest first).
+    Includes job metadata such as URL, keyword, status, timestamps, and tags.
+    
+    Args:
+        page: Page number (1-indexed, default: 1)
+        page_size: Number of items per page (default: 20, max: 100)
+        db: Database session
+        api_key: Validated API key
+        
+    Returns:
+        CrawlJobListResponse with jobs list and pagination metadata
+        
+    Raises:
+        HTTPException: 400 if pagination parameters are invalid, 500 if retrieval fails
+    """
+    try:
+        # Validate pagination parameters
+        if page < 1:
+            page = 1
+        if page_size < 1:
+            page_size = 20
+        if page_size > 100:
+            page_size = 100
+        
+        logger.info(f"Listing crawl jobs: page={page}, page_size={page_size}")
+        
+        # Get paginated jobs from database
+        jobs, total_count = await get_jobs_paginated(db, page, page_size)
+        
+        # Calculate total pages
+        import math
+        total_pages = math.ceil(total_count / page_size) if total_count > 0 else 0
+        
+        # Convert jobs to response format
+        import json
+        job_items = []
+        for job in jobs:
+            # Parse tags from JSON string
+            tags_list = []
+            if job.tags:
+                try:
+                    tags_list = json.loads(job.tags) if isinstance(job.tags, str) else job.tags
+                except:
+                    tags_list = []
+            
+            job_items.append(
+                CrawlJobListItem(
+                    job_id=job.id,
+                    url=job.input_url,
+                    keyword=job.keyword,
+                    status=job.status,
+                    created_at=job.created_at,
+                    completed_at=job.completed_at,
+                    error=job.error,
+                    tags=tags_list
+                )
+            )
+        
+        # Build pagination metadata
+        pagination = PaginationMetadata(
+            total=total_count,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages
+        )
+        
+        logger.info(f"Retrieved {len(job_items)} jobs (total: {total_count})")
+        
+        return CrawlJobListResponse(
+            jobs=job_items,
+            pagination=pagination
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing crawl jobs: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve crawl jobs"
+        )
+
+
+@app.get(
     "/crawl/{job_id}",
     response_model=CrawlStatusResponse,
     responses={
@@ -439,6 +541,78 @@ async def get_crawl_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve job status"
+        )
+
+
+@app.delete(
+    "/crawl/{job_id}",
+    response_model=DeleteJobResponse,
+    responses={
+        200: {"description": "Job deleted successfully"},
+        400: {"model": ErrorResponse, "description": "Invalid job ID format"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        404: {"model": ErrorResponse, "description": "Job not found"},
+        409: {"model": ErrorResponse, "description": "Cannot delete in-progress job"},
+        500: {"model": ErrorResponse, "description": "Internal server error"}
+    },
+    tags=["Crawl"]
+)
+async def delete_crawl_job(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Delete a crawl job by ID.
+    
+    Deletes the specified crawl job and all associated results from the database.
+    Cannot delete jobs that are currently in progress.
+    
+    Args:
+        job_id: UUID of the crawl job to delete
+        db: Database session
+        api_key: Validated API key
+        
+    Returns:
+        DeleteJobResponse with success message and deleted job ID
+        
+    Raises:
+        HTTPException: 404 if job not found, 409 if job is in progress, 500 if deletion fails
+    """
+    try:
+        logger.info(f"Deleting crawl job {job_id}")
+        
+        # Attempt to delete the job
+        deleted = await delete_job_by_id(db, str(job_id))
+        
+        if not deleted:
+            logger.warning(f"Job not found: {job_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job with ID {job_id} not found"
+            )
+        
+        logger.info(f"Successfully deleted job {job_id}")
+        
+        return DeleteJobResponse(
+            message="Crawl job deleted successfully",
+            job_id=job_id
+        )
+        
+    except ValueError as e:
+        # Job is in progress
+        logger.warning(f"Cannot delete in-progress job {job_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting job {job_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete crawl job"
         )
 
 

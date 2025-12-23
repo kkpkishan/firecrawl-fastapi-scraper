@@ -92,6 +92,26 @@ async def init_db():
             if existing_columns and len(existing_columns) == 2:
                 logger.info("✓ Migration columns already exist, skipping")
             
+            # Add tags column if it doesn't exist
+            result = await conn.execute(text("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'crawl_jobs' 
+                AND column_name = 'tags'
+            """))
+            
+            tags_column_exists = result.fetchone() is not None
+            
+            if not tags_column_exists:
+                logger.info("Adding tags column to crawl_jobs table...")
+                await conn.execute(text("""
+                    ALTER TABLE crawl_jobs 
+                    ADD COLUMN tags TEXT DEFAULT '[]'
+                """))
+                logger.info("✓ Added tags column")
+            else:
+                logger.info("✓ Tags column already exists, skipping")
+            
             # Create indexes for performance
             # Note: Indexes are defined in the model, but we can add custom ones here
             await conn.execute(text("""
@@ -374,3 +394,80 @@ async def create_result(
     await db.refresh(result)
     
     return result
+
+
+async def get_jobs_paginated(
+    db: AsyncSession,
+    page: int = 1,
+    page_size: int = 20
+):
+    """
+    Get paginated list of crawl jobs ordered by creation time (newest first).
+    
+    Args:
+        db: Database session
+        page: Page number (1-indexed)
+        page_size: Number of items per page
+        
+    Returns:
+        Tuple of (jobs_list, total_count)
+    """
+    from models import CrawlJob
+    from sqlalchemy import select, func
+    
+    # Calculate offset
+    offset = (page - 1) * page_size
+    
+    # Get total count
+    count_stmt = select(func.count()).select_from(CrawlJob)
+    total_result = await db.execute(count_stmt)
+    total_count = total_result.scalar()
+    
+    # Get paginated jobs
+    stmt = (
+        select(CrawlJob)
+        .order_by(CrawlJob.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
+    
+    result = await db.execute(stmt)
+    jobs = result.scalars().all()
+    
+    return jobs, total_count
+
+
+async def delete_job_by_id(db: AsyncSession, job_id: str):
+    """
+    Delete a crawl job by ID (cascade deletes associated results).
+    
+    Args:
+        db: Database session
+        job_id: UUID of the job to delete
+        
+    Returns:
+        True if job was deleted, False if job not found
+        
+    Raises:
+        ValueError: If job is in 'in_progress' status
+    """
+    from models import CrawlJob
+    from sqlalchemy import select, delete
+    
+    # First check if job exists and get its status
+    job = await get_job_by_id(db, job_id)
+    
+    if not job:
+        return False
+    
+    # Prevent deletion of in-progress jobs
+    if job.status == 'in_progress':
+        raise ValueError("Cannot delete job that is currently in progress")
+    
+    # Delete the job (cascade will delete associated results)
+    stmt = delete(CrawlJob).where(CrawlJob.id == job_id)
+    await db.execute(stmt)
+    await db.commit()
+    
+    return True
+

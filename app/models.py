@@ -79,6 +79,14 @@ class CrawlJob(Base):
         comment="Error message if the job failed"
     )
     
+    # Tags for organization
+    tags = Column(
+        Text,
+        nullable=True,
+        default='[]',
+        comment="JSON array of tags for organizing jobs"
+    )
+    
     # Relationship to results
     results = relationship(
         "CrawlResult",
@@ -100,6 +108,14 @@ class CrawlJob(Base):
     
     def to_dict(self):
         """Convert model to dictionary for JSON serialization"""
+        import json
+        tags_list = []
+        if self.tags:
+            try:
+                tags_list = json.loads(self.tags) if isinstance(self.tags, str) else self.tags
+            except:
+                tags_list = []
+        
         return {
             'id': str(self.id),
             'input_url': self.input_url,
@@ -108,7 +124,8 @@ class CrawlJob(Base):
             'firecrawl_job_id': self.firecrawl_job_id,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
-            'error': self.error
+            'error': self.error,
+            'tags': tags_list
         }
 
 

@@ -281,3 +281,170 @@ class ReadinessResponse(BaseModel):
         description="Firecrawl service status",
         examples=["available", "unavailable", "not_implemented"]
     )
+
+
+class CrawlJobListItem(BaseModel):
+    """
+    Schema for a single crawl job in the list response.
+    
+    Attributes:
+        job_id: Unique identifier for the crawl job
+        url: The original URL that was crawled
+        keyword: The search keyword
+        status: Current status (pending, in_progress, completed, failed)
+        created_at: When the job was created
+        completed_at: When the job completed (None if still in progress)
+        error: Error message if job failed (None otherwise)
+        tags: List of tags associated with the job
+    """
+    job_id: UUID = Field(
+        ...,
+        description="Unique identifier for the crawl job"
+    )
+    url: str = Field(
+        ...,
+        description="The original URL that was crawled"
+    )
+    keyword: str = Field(
+        ...,
+        description="The search keyword"
+    )
+    status: str = Field(
+        ...,
+        description="Current status of the job",
+        examples=["pending", "in_progress", "completed", "failed"]
+    )
+    created_at: datetime = Field(
+        ...,
+        description="When the job was created"
+    )
+    completed_at: Optional[datetime] = Field(
+        None,
+        description="When the job completed (success or failure)"
+    )
+    error: Optional[str] = Field(
+        None,
+        description="Error message if job failed"
+    )
+    tags: List[str] = Field(
+        default_factory=list,
+        description="List of tags for organizing jobs"
+    )
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "job_id": "123e4567-e89b-12d3-a456-426614174000",
+                "url": "https://example.com",
+                "keyword": "example",
+                "status": "completed",
+                "created_at": "2024-01-01T00:00:00",
+                "completed_at": "2024-01-01T00:01:00",
+                "error": None,
+                "tags": ["production", "important"]
+            }
+        }
+    )
+
+
+class PaginationMetadata(BaseModel):
+    """
+    Pagination metadata for list responses.
+    
+    Attributes:
+        total: Total number of items across all pages
+        page: Current page number (1-indexed)
+        page_size: Number of items per page
+        total_pages: Total number of pages
+    """
+    total: int = Field(
+        ...,
+        description="Total number of items across all pages",
+        ge=0
+    )
+    page: int = Field(
+        ...,
+        description="Current page number (1-indexed)",
+        ge=1
+    )
+    page_size: int = Field(
+        ...,
+        description="Number of items per page",
+        ge=1
+    )
+    total_pages: int = Field(
+        ...,
+        description="Total number of pages",
+        ge=0
+    )
+
+
+class CrawlJobListResponse(BaseModel):
+    """
+    Response schema for listing crawl jobs.
+    
+    Attributes:
+        jobs: List of crawl jobs for the current page
+        pagination: Pagination metadata
+    """
+    jobs: List[CrawlJobListItem] = Field(
+        ...,
+        description="List of crawl jobs for the current page"
+    )
+    pagination: PaginationMetadata = Field(
+        ...,
+        description="Pagination metadata"
+    )
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "jobs": [
+                    {
+                        "job_id": "123e4567-e89b-12d3-a456-426614174000",
+                        "url": "https://example.com",
+                        "keyword": "example",
+                        "status": "completed",
+                        "created_at": "2024-01-01T00:00:00",
+                        "completed_at": "2024-01-01T00:01:00",
+                        "error": None,
+                        "tags": ["production"]
+                    }
+                ],
+                "pagination": {
+                    "total": 100,
+                    "page": 1,
+                    "page_size": 20,
+                    "total_pages": 5
+                }
+            }
+        }
+    )
+
+
+class DeleteJobResponse(BaseModel):
+    """
+    Response schema for deleting a crawl job.
+    
+    Attributes:
+        message: Success message
+        job_id: ID of the deleted job
+    """
+    message: str = Field(
+        ...,
+        description="Success message"
+    )
+    job_id: UUID = Field(
+        ...,
+        description="ID of the deleted job"
+    )
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "message": "Crawl job deleted successfully",
+                "job_id": "123e4567-e89b-12d3-a456-426614174000"
+            }
+        }
+    )
+
