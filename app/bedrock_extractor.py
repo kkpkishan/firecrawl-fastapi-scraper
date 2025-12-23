@@ -250,6 +250,7 @@ class BedrockExtractor:
             url=url,
             content_type=content_type,
             parent_url=parent_url,
+            model_id=self.model_id,
             content=content[:10000]  # Limit content to avoid token limits
         )
         
@@ -262,6 +263,11 @@ class BedrockExtractor:
         Returns:
             System prompt string with placeholders
         """
+        # Use simplified prompt for Amazon Titan models
+        if 'titan' in self.model_id.lower():
+            return self._get_titan_prompt()
+        
+        # Use detailed prompt for Claude models
         return """You are a data extraction assistant for a web scraping system. Your task is to analyze web page content and extract structured information according to a specific schema.
 
 ## Task
@@ -347,6 +353,59 @@ You will receive the following metadata about the content:
 Use this metadata to provide context-aware extraction.
 
 ## Content to Analyze
+
+{content}
+"""
+    
+    def _get_titan_prompt(self) -> str:
+        """
+        Get simplified prompt for Amazon Titan models.
+        Titan models need simpler, more direct instructions.
+        
+        Returns:
+            Simplified prompt string with placeholders
+        """
+        return """Extract exam information from the following document.
+
+Find all exam names, exam dates, and related information.
+
+Return your answer as valid JSON only, with this structure:
+
+{{
+  "page_info": {{
+    "title": "document title",
+    "url": "{url}",
+    "summary": "brief summary"
+  }},
+  "extracted_fields": [
+    {{
+      "key": "Exam Name",
+      "value": "the exam name",
+      "confidence": "high",
+      "context": "surrounding text"
+    }}
+  ],
+  "dates": [
+    {{
+      "label": "Exam Date",
+      "value": "2026-05-24",
+      "context": "surrounding text"
+    }}
+  ],
+  "metadata": {{
+    "extraction_timestamp": "2025-12-23T10:00:00Z",
+    "model_used": "{model_id}",
+    "content_type": "{content_type}"
+  }}
+}}
+
+Important:
+- Return ONLY the JSON, no other text
+- Dates must be in YYYY-MM-DD format
+- Extract all exam names and dates you find
+- Use "high", "medium", or "low" for confidence
+
+Document content:
 
 {content}
 """
