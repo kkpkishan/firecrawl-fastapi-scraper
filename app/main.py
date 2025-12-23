@@ -14,7 +14,7 @@ import re
 from datetime import datetime
 from typing import List, Dict, Optional
 
-from database import init_db, close_db, check_db_connection, get_db, create_job, update_job_status, get_job_by_id, create_result, get_jobs_paginated, delete_job_by_id
+from database import init_db, close_db, check_db_connection, get_db, create_job, update_job_status, get_job_by_id, create_result, get_jobs_by_date_range, delete_job_by_id
 from config import settings
 from auth import verify_api_key
 from schemas import CrawlRequest, CrawlResponse, CrawlStatusResponse, ResultItem, ErrorResponse, CrawlJobListResponse, CrawlJobListItem, PaginationMetadata, DeleteJobResponse
@@ -359,46 +359,58 @@ async def crawl_nested_urls(
     tags=["Crawl"]
 )
 async def list_crawl_jobs(
-    page: int = 1,
-    page_size: int = 20,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
     """
-    List all crawl jobs with pagination.
+    List all crawl jobs filtered by date range.
     
-    Retrieves a paginated list of all crawl jobs ordered by creation time (newest first).
-    Includes job metadata such as URL, keyword, status, timestamps, and tags.
+    Retrieves all crawl jobs ordered by creation time (newest first).
+    Optionally filter by start_date and end_date.
     
     Args:
-        page: Page number (1-indexed, default: 1)
-        page_size: Number of items per page (default: 20, max: 100)
+        start_date: Filter jobs created on or after this date (format: YYYY-MM-DD)
+        end_date: Filter jobs created on or before this date (format: YYYY-MM-DD)
         db: Database session
         api_key: Validated API key
         
     Returns:
-        CrawlJobListResponse with jobs list and pagination metadata
+        CrawlJobListResponse with jobs list
         
     Raises:
-        HTTPException: 400 if pagination parameters are invalid, 500 if retrieval fails
+        HTTPException: 400 if date format is invalid, 500 if retrieval fails
     """
     try:
-        # Validate pagination parameters
-        if page < 1:
-            page = 1
-        if page_size < 1:
-            page_size = 20
-        if page_size > 100:
-            page_size = 100
+        logger.info(f"Listing crawl jobs: start_date={start_date}, end_date={end_date}")
         
-        logger.info(f"Listing crawl jobs: page={page}, page_size={page_size}")
+        # Parse dates if provided
+        start_datetime = None
+        end_datetime = None
         
-        # Get paginated jobs from database
-        jobs, total_count = await get_jobs_paginated(db, page, page_size)
+        if start_date:
+            try:
+                start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid start_date format. Use YYYY-MM-DD"
+                )
         
-        # Calculate total pages
-        import math
-        total_pages = math.ceil(total_count / page_size) if total_count > 0 else 0
+        if end_date:
+            try:
+                end_datetime = datetime.strptime(end_date, "%Y-%m-%d")
+                # Set to end of day
+                end_datetime = end_datetime.replace(hour=23, minute=59, second=59)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid end_date format. Use YYYY-MM-DD"
+                )
+        
+        # Get jobs from database with date filter
+        jobs, total_count = await get_jobs_by_date_range(db, start_datetime, end_datetime)
         
         # Convert jobs to response format
         import json
@@ -425,12 +437,12 @@ async def list_crawl_jobs(
                 )
             )
         
-        # Build pagination metadata
+        # Build pagination metadata (keeping for backward compatibility)
         pagination = PaginationMetadata(
             total=total_count,
-            page=page,
-            page_size=page_size,
-            total_pages=total_pages
+            page=1,
+            page_size=total_count,
+            total_pages=1
         )
         
         logger.info(f"Retrieved {len(job_items)} jobs (total: {total_count})")

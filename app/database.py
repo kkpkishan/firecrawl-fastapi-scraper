@@ -10,7 +10,8 @@ from sqlalchemy.exc import OperationalError, DBAPIError
 import os
 import logging
 import asyncio
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
+from datetime import datetime
 
 from models import Base
 
@@ -396,6 +397,62 @@ async def create_result(
     return result
 
 
+async def get_jobs_by_date_range(
+    db: AsyncSession,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None
+):
+    """
+    Get list of crawl jobs filtered by date range, ordered by creation time (newest first).
+    
+    Args:
+        db: Database session
+        start_date: Filter jobs created on or after this date (optional)
+        end_date: Filter jobs created on or before this date (optional)
+        
+    Returns:
+        Tuple of (jobs_list, total_count)
+    """
+    from models import CrawlJob
+    from sqlalchemy import select, func, and_
+    
+    # Build query with date filters
+    conditions = []
+    
+    if start_date:
+        conditions.append(CrawlJob.created_at >= start_date)
+    
+    if end_date:
+        conditions.append(CrawlJob.created_at <= end_date)
+    
+    # Get total count
+    if conditions:
+        count_stmt = select(func.count()).select_from(CrawlJob).where(and_(*conditions))
+    else:
+        count_stmt = select(func.count()).select_from(CrawlJob)
+    
+    total_result = await db.execute(count_stmt)
+    total_count = total_result.scalar()
+    
+    # Get jobs
+    if conditions:
+        stmt = (
+            select(CrawlJob)
+            .where(and_(*conditions))
+            .order_by(CrawlJob.created_at.desc())
+        )
+    else:
+        stmt = (
+            select(CrawlJob)
+            .order_by(CrawlJob.created_at.desc())
+        )
+    
+    result = await db.execute(stmt)
+    jobs = result.scalars().all()
+    
+    return jobs, total_count
+
+
 async def get_jobs_paginated(
     db: AsyncSession,
     page: int = 1,
@@ -403,6 +460,8 @@ async def get_jobs_paginated(
 ):
     """
     Get paginated list of crawl jobs ordered by creation time (newest first).
+    
+    DEPRECATED: Use get_jobs_by_date_range instead.
     
     Args:
         db: Database session
