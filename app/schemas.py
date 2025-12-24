@@ -349,7 +349,9 @@ class CrawlJobListItem(BaseModel):
 
 class CrawlJobListResponse(BaseModel):
     """
-    Response schema for listing crawl jobs.
+    Response schema for listing crawl jobs with date range filtering.
+    
+    Returns all jobs within the specified date range without pagination.
     
     Attributes:
         jobs: List of crawl jobs matching the date range filter
