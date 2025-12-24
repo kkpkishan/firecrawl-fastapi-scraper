@@ -655,21 +655,20 @@ Document content:
         Returns:
             Fix prompt string
         """
-        return f"""Your previous response had a JSON parsing error: {error}
+        return f"""CRITICAL: Your previous response had a JSON parsing error: {error}
 
-Please provide the extracted data again, ensuring it is ONLY valid JSON with no additional text, comments, or markdown formatting.
+You MUST output ONLY the JSON object itself. Do NOT include:
+- Any explanatory text before or after the JSON
+- Phrases like "Here is the extracted data"
+- Markdown code blocks (no ``` markers)
+- Comments or notes
+
+Start your response with {{ and end with }}. Nothing else.
 
 Previous response that failed:
 {previous_response[:500]}
 
-Remember:
-1. Output ONLY valid JSON
-2. No markdown code blocks
-3. No explanations or comments
-4. Follow the exact schema provided earlier
-
-Original content to extract from:
-{content[:5000]}
+Output the corrected JSON now:
 """
     
     def _build_validation_fix_prompt(self, previous_data: Dict, errors: List[str], content: str, metadata: Dict[str, Any]) -> str:
