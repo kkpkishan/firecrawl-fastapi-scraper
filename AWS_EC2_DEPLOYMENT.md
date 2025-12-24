@@ -5,29 +5,69 @@
 When deploying to AWS EC2, the firecrawl-api service was failing with:
 ```
 Error: Port 3002 did not become available within 30000ms
+    at Timeout.<anonymous> (/app/dist/src/harness.js:173:52)
 ```
 
 This happened because:
-- The harness.js process manager has a hardcoded 30-second timeout
+- The `harness.js` process manager has a hardcoded 30-second timeout
 - AWS EC2 instances (especially smaller ones) take longer to start services
 - OpenTelemetry instrumentation adds startup overhead
+- Multiple workers (api, worker, extract-worker, nuq-worker-0 to nuq-worker-4) need time to initialize
 - The API server wasn't binding to port 3002 within the timeout
+
+**Root Cause:** The timeout is hardcoded in `apps/api/dist/src/harness.js` at line 173:
+```javascript
+const timeoutMs = 30000; // 30 seconds - TOO SHORT for AWS EC2
+```
 
 ## Solution
 
-We've implemented a custom entrypoint script that automatically patches the harness.js timeout from 30 seconds to 90 seconds.
+We've implemented a **runtime patching solution** that automatically fixes the timeout without modifying source code.
 
-### Files Added
+### How It Works
 
-1. **`apps/api/docker-entrypoint-custom.sh`**
-   - Patches harness.js before starting services
-   - Increases timeout from 30000ms to 90000ms
-   - Automatically applied on container startup
+1. **Custom Entrypoint Script** (`apps/api/docker-entrypoint-custom.sh`):
+   - Runs before the main command
+   - Uses `sed` to patch the compiled JavaScript file
+   - Changes `timeoutMs = 30000` to `timeoutMs = 90000`
+   - Executes the original command
 
-2. **Updated `docker-compose.yaml`**
-   - Mounts custom entrypoint script
+2. **Docker Configuration** (`docker-compose.yaml`):
+   - Mounts the custom entrypoint as read-only volume
+   - Overrides the default entrypoint
    - Adds healthcheck with 60s start period
-   - Configures proper volume mounting
+
+### Why This Approach?
+
+✅ **No source code changes** - Works with any Firecrawl version  
+✅ **Automatic** - Applied on every container start  
+✅ **Portable** - Works on local dev and AWS EC2  
+✅ **Safe** - Only patches the timeout value, nothing else  
+
+### Verification
+
+Check if the patch was applied:
+```bash
+docker logs firecrawl-api 2>&1 | head -5
+# Should show:
+# Patching harness.js to increase startup timeout...
+# Timeout increased to 90 seconds
+```
+
+### Services Started by harness.js
+
+The harness.js process manager starts 8 services simultaneously:
+
+1. **api** - Main API server on port 3002
+2. **worker** - Queue worker for background jobs
+3. **extract-worker** - Content extraction worker
+4. **nuq-worker-0** to **nuq-worker-4** - 5 parallel scraping workers
+
+All services must initialize before the timeout expires. With 90 seconds, there's enough time for:
+- OpenTelemetry instrumentation
+- Redis connections
+- Database connections
+- Worker initialization
 
 ## Deployment Steps
 
