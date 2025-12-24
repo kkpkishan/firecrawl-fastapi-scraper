@@ -438,11 +438,12 @@ async def list_crawl_jobs(
             )
         
         # Build pagination metadata (keeping for backward compatibility)
+        # Ensure page_size is at least 1 to satisfy validation
         pagination = PaginationMetadata(
             total=total_count,
             page=1,
-            page_size=total_count,
-            total_pages=1
+            page_size=max(1, total_count),
+            total_pages=1 if total_count > 0 else 0
         )
         
         logger.info(f"Retrieved {len(job_items)} jobs (total: {total_count})")
