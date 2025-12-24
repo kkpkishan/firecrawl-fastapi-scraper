@@ -347,53 +347,22 @@ class CrawlJobListItem(BaseModel):
     )
 
 
-class PaginationMetadata(BaseModel):
-    """
-    Pagination metadata for list responses.
-    
-    Attributes:
-        total: Total number of items across all pages
-        page: Current page number (1-indexed)
-        page_size: Number of items per page
-        total_pages: Total number of pages
-    """
-    total: int = Field(
-        ...,
-        description="Total number of items across all pages",
-        ge=0
-    )
-    page: int = Field(
-        ...,
-        description="Current page number (1-indexed)",
-        ge=1
-    )
-    page_size: int = Field(
-        ...,
-        description="Number of items per page",
-        ge=1
-    )
-    total_pages: int = Field(
-        ...,
-        description="Total number of pages",
-        ge=0
-    )
-
-
 class CrawlJobListResponse(BaseModel):
     """
     Response schema for listing crawl jobs.
     
     Attributes:
-        jobs: List of crawl jobs for the current page
-        pagination: Pagination metadata
+        jobs: List of crawl jobs matching the date range filter
+        total: Total number of jobs returned
     """
     jobs: List[CrawlJobListItem] = Field(
         ...,
-        description="List of crawl jobs for the current page"
+        description="List of crawl jobs matching the date range filter"
     )
-    pagination: PaginationMetadata = Field(
+    total: int = Field(
         ...,
-        description="Pagination metadata"
+        description="Total number of jobs returned",
+        ge=0
     )
     
     model_config = ConfigDict(
@@ -411,12 +380,7 @@ class CrawlJobListResponse(BaseModel):
                         "tags": ["production"]
                     }
                 ],
-                "pagination": {
-                    "total": 100,
-                    "page": 1,
-                    "page_size": 20,
-                    "total_pages": 5
-                }
+                "total": 1
             }
         }
     )

@@ -17,7 +17,7 @@ from typing import List, Dict, Optional
 from database import init_db, close_db, check_db_connection, get_db, create_job, update_job_status, get_job_by_id, create_result, get_jobs_by_date_range, delete_job_by_id
 from config import settings
 from auth import verify_api_key
-from schemas import CrawlRequest, CrawlResponse, CrawlStatusResponse, ResultItem, ErrorResponse, CrawlJobListResponse, CrawlJobListItem, PaginationMetadata, DeleteJobResponse
+from schemas import CrawlRequest, CrawlResponse, CrawlStatusResponse, ResultItem, ErrorResponse, CrawlJobListResponse, CrawlJobListItem, DeleteJobResponse
 from regex_extractor import get_extractor, extract_with_regex
 from nested_scraper import get_nested_scraper
 from document_extractor import get_document_extractor
@@ -437,20 +437,11 @@ async def list_crawl_jobs(
                 )
             )
         
-        # Build pagination metadata (keeping for backward compatibility)
-        # Ensure page_size is at least 1 to satisfy validation
-        pagination = PaginationMetadata(
-            total=total_count,
-            page=1,
-            page_size=max(1, total_count),
-            total_pages=1 if total_count > 0 else 0
-        )
-        
         logger.info(f"Retrieved {len(job_items)} jobs (total: {total_count})")
         
         return CrawlJobListResponse(
             jobs=job_items,
-            pagination=pagination
+            total=total_count
         )
         
     except HTTPException:

@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile
     container_name: fastapi-app
     ports:
-      - "8000:8000"
+      - "10080:8000"
     env_file:
       - .env
     environment:
@@ -48,10 +48,10 @@ services:
       dockerfile: Dockerfile
     container_name: firecrawl-api
     ports:
-      - "${PORT:-3002}:${INTERNAL_PORT:-3002}"
+      - "3002:3002"
     environment:
       - HOST=0.0.0.0
-      - PORT=${INTERNAL_PORT:-3002}
+      - PORT=3002
       - NUM_WORKERS_PER_QUEUE=${NUM_WORKERS_PER_QUEUE:-8}
       - REDIS_URL=redis://redis:6379
       - REDIS_RATE_LIMIT_URL=redis://redis:6379
@@ -61,10 +61,14 @@ services:
       - LOGGING_LEVEL=${FIRECRAWL_LOGGING_LEVEL:-INFO}
       - BULL_AUTH_KEY=${BULL_AUTH_KEY:-@}
       - ENV=local
+      - INTERNAL_PORT=3002
     depends_on:
-      - nuq-postgres
-      - redis
-      - playwright-service
+      nuq-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      playwright-service:
+        condition: service_started
     networks:
       - backend
     restart: unless-stopped
@@ -83,7 +87,7 @@ services:
       dockerfile: Dockerfile
     container_name: nuq-postgres
     ports:
-      - "5432:5432"
+      - "5432"
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
@@ -101,14 +105,14 @@ services:
 
   # Redis Cache and Queue
   redis:
-    image: redis:alpine
+    image: redis/redis-stack:latest
     container_name: redis
     ports:
-      - "6379:6379"
+      - "6379"
     networks:
       - backend
     restart: unless-stopped
-    command: redis-server --bind 0.0.0.0
+    command: redis-server --bind 0.0.0.0 --protected-mode no
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
