@@ -798,7 +798,8 @@ def validate_extraction_schema(data: dict) -> Tuple[bool, List[str]]:
                 if not isinstance(field, dict):
                     errors.append(f"extracted_fields[{i}] must be an object")
                     continue
-                required = ['key', 'value', 'confidence', 'context']
+                # Only key, value, and confidence are required; context is optional
+                required = ['key', 'value', 'confidence']
                 for req in required:
                     if req not in field:
                         errors.append(f"extracted_fields[{i}] missing field: {req}")
@@ -819,25 +820,20 @@ def validate_extraction_schema(data: dict) -> Tuple[bool, List[str]]:
                     errors.append(f"dates[{i}] must be an object")
                     continue
                 
-                required_date_fields = ['label', 'value', 'context']
-                for field in required_date_fields:
-                    if field not in date:
-                        errors.append(f"dates[{i}] missing field: {field}")
+                # Only 'value' is required, 'label' and 'context' are optional
+                if 'value' not in date:
+                    errors.append(f"dates[{i}] missing required field: value")
                 
                 # Validate ISO 8601 date format (YYYY-MM-DD)
                 if 'value' in date:
                     if not re.match(r'^\d{4}-\d{2}-\d{2}$', str(date['value'])):
                         errors.append(f"dates[{i}].value must be in ISO 8601 format (YYYY-MM-DD)")
     
-    # Validate metadata
+    # Validate metadata (all fields optional)
     if 'metadata' in data:
         if not isinstance(data['metadata'], dict):
             errors.append("metadata must be a dictionary")
-        else:
-            required_meta_fields = ['extraction_timestamp', 'model_used', 'content_type']
-            for field in required_meta_fields:
-                if field not in data['metadata']:
-                    errors.append(f"metadata missing required field: {field}")
+        # No required fields - all metadata fields are optional
     
     return len(errors) == 0, errors
 
