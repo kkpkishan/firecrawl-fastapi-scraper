@@ -62,6 +62,7 @@ services:
       - BULL_AUTH_KEY=${BULL_AUTH_KEY:-@}
       - ENV=local
       - INTERNAL_PORT=3002
+      - STARTUP_TIMEOUT=60000
     depends_on:
       nuq-postgres:
         condition: service_healthy
@@ -79,6 +80,12 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: node dist/src/harness.js --start-docker
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
 
   # PostgreSQL Database
   nuq-postgres:
