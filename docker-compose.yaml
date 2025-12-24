@@ -79,6 +79,9 @@ services:
         hard: 65535
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - ./apps/api/docker-entrypoint-custom.sh:/docker-entrypoint-custom.sh:ro
+    entrypoint: ["/bin/bash", "/docker-entrypoint-custom.sh"]
     command: node dist/src/harness.js --start-docker
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3002/"]
